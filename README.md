@@ -12,7 +12,7 @@ API and adds utilities for canon-gating Quilt content.
 ## Quick start
 
 ```bash
-export TYPESAFEAI_KEY=apikey_...
+export TYPESAFE_API_KEY=apikey_...   # legacy TYPESAFEAI_KEY also accepted
 python3 jev_client.py "the earth is round" '{"x": {"type": "noul", "instructions": "Is this true?"}}'
 ```
 

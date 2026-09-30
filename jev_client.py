@@ -26,7 +26,7 @@ BASE = "https://api.typesafe.ai"
 
 def _hdr():
     return {
-        "Authorization": f"Bearer {os.environ['TYPESAFEAI_KEY']}",
+        "Authorization": f"Bearer {os.environ.get("TYPESAFE_API_KEY") or os.environ["TYPESAFEAI_KEY"]}",
         "Content-Type": "application/json",
         "User-Agent": "quilt-jev-toolkit/1.0",
     }
@@ -116,8 +116,8 @@ def canon_gate(text, *, gate_threshold=0.7):
 
 if __name__ == "__main__":
     # Test
-    if "TYPESAFEAI_KEY" not in os.environ:
-        print("Set TYPESAFEAI_KEY env var")
+    if "TYPESAFE_API_KEY" not in os.environ and "TYPESAFEAI_KEY" not in os.environ:
+        print("Set TYPESAFE_API_KEY (fleet standard) or legacy TYPESAFEAI_KEY env var")
         exit(1)
 
     print("=== Models ===")
