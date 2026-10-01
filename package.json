@@ -1,0 +1,14 @@
+{
+  "name": "quilt-jev-toolkit",
+  "version": "0.1.0",
+  "private": true,
+  "description": "JEV canon-oracle toolkit for Quilt + the Cell-Organ Snapshot & Boot protocol (v0). No external deps; Node >= 18.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/organ.test.mjs",
+    "demo": "node examples/boot-demo.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

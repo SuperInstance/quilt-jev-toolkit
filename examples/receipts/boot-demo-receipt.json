@@ -1,0 +1,92 @@
+{
+  "schema": "quilt-jev-toolkit/boot-demo-receipt/v0",
+  "lane": "63-c",
+  "writtenAt": "2026-10-01T23:19:45.985Z",
+  "organ": {
+    "organId": "greeter-organ@37b387834d456c92",
+    "name": "greeter-organ"
+  },
+  "manifests": {
+    "snapshot1": {
+      "manifestHash": "92137944254ce97f7107fa728cdebe8ecb75558f65ca4b0506552431ca3a60c2",
+      "stateHash": "7d5e08940c44b56850dfcda3aa847c8c48496f9a82f39ea3918c09824430d605",
+      "receipts": 12
+    },
+    "snapshot2": {
+      "manifestHash": "6536de5eb892465913a78397dfe1c385ed36f65a3784c7ff2d68adebbd64b535",
+      "stateHash": "7d5e08940c44b56850dfcda3aa847c8c48496f9a82f39ea3918c09824430d605",
+      "receipts": 16,
+      "supersedes": "92137944254ce97f7107fa728cdebe8ecb75558f65ca4b0506552431ca3a60c2"
+    }
+  },
+  "replayDeterminism": {
+    "hashBefore": "7d5e08940c44b56850dfcda3aa847c8c48496f9a82f39ea3918c09824430d605",
+    "hashAfter": "7d5e08940c44b56850dfcda3aa847c8c48496f9a82f39ea3918c09824430d605",
+    "equal": true
+  },
+  "failClosed": [
+    {
+      "case": "state byte flip",
+      "code": "STATE_HASH_MISMATCH"
+    },
+    {
+      "case": "receipt payload byte flip",
+      "code": "RECEIPT_HASH_MISMATCH"
+    },
+    {
+      "case": "host credit attestation forgery",
+      "code": "DOUBLE_ENTRY_STATE_MISMATCH"
+    }
+  ],
+  "hostLedgers": {
+    "host1": 6,
+    "host2": 2
+  },
+  "stages": [
+    {
+      "stage": "1.snapshot",
+      "ok": true,
+      "detail": "organId=greeter-organ@37b387834d456c92 receipts=12 stateHash=7d5e08940c44b568… manifestHash=92137944254ce97f…"
+    },
+    {
+      "stage": "2.tamper-state",
+      "ok": true,
+      "detail": "flipped '!'→'?' in out; boot refused with STATE_HASH_MISMATCH"
+    },
+    {
+      "stage": "2b.tamper-receipt",
+      "ok": true,
+      "detail": "tampered seq 5 payload; boot refused with RECEIPT_HASH_MISMATCH"
+    },
+    {
+      "stage": "3.boot-nest",
+      "ok": true,
+      "detail": "out=\"Ahoy, SuperInstance!\"; host ledger seq now 2 (init + organ.nest)"
+    },
+    {
+      "stage": "4.continue-double-entry",
+      "ok": true,
+      "detail": "4 debits / 4 credits pair 1:1, state hashes attested; out=\"Ahoy, SuperInstance!\""
+    },
+    {
+      "stage": "5.re-snapshot",
+      "ok": true,
+      "detail": "receipts 16 (12+4), supersedes=92137944254ce97f…, organId stable=true"
+    },
+    {
+      "stage": "5b.replay-determinism",
+      "ok": true,
+      "detail": "state hash BEFORE nesting round-trip == AFTER == snapshot claim: 7d5e08940c44b56850dfcda3aa847c8c48496f9a82f39ea3918c09824430d605"
+    },
+    {
+      "stage": "5c.second-host-double-entry",
+      "ok": true,
+      "detail": "re-nested in host-quilt-B; 0 new credits until it appends (nest marker pins organSeq 15)"
+    },
+    {
+      "stage": "5d.credit-forgery-fail-closed",
+      "ok": true,
+      "detail": "self-consistent forged ledger caught: DOUBLE_ENTRY_STATE_MISMATCH"
+    }
+  ]
+}
