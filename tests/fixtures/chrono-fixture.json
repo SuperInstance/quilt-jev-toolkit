@@ -1,0 +1,199 @@
+{
+  "provenance": {
+    "generator": "scripts/vendor-chrono-fixture.mjs",
+    "generatedBy": "lane 68-a (wave-68)",
+    "source": "SuperInstance/quilt-chrono",
+    "sourceCommit": "61c4a612bf3575a6655cdc85a9403ce37329230b",
+    "sourceModules": [
+      "src/ledger.js",
+      "src/seal.js"
+    ],
+    "clock": "Clock({ startMs: 2026-01-01T00:00:00.000Z, stepMs: 1000 }) — fully deterministic",
+    "keyNote": "the seal key is a test-only fixture key, not a credential; it lives in the test suite and this generator",
+    "demoSheet": "7 entries: init-write, pull-read, set-write, push pair (read+write), null-read, set-write; sealed at the tip"
+  },
+  "key": "chrono-fixture-key-test-only-not-a-credential",
+  "organId": "chrono-demo@ef28377edd1b07fc",
+  "manifestHash": "e4ab110f2bd1ae8c0da8d62bf6e8456719d1c83514faf8f81e2522e2003d63c9",
+  "chainTip": "6e06042538527c6b58c011dc02a77c6db6b3c1cac547270a42c444da87901612",
+  "checkpoint": {
+    "schema": "quilt.organ.checkpoint",
+    "schemaVersion": 1,
+    "alg": "HMAC-SHA256",
+    "seq": 6,
+    "hash": "6e06042538527c6b58c011dc02a77c6db6b3c1cac547270a42c444da87901612",
+    "manifestHash": "e4ab110f2bd1ae8c0da8d62bf6e8456719d1c83514faf8f81e2522e2003d63c9",
+    "sig": "1a983f9107d029a70c56b54aaa07e717dba92d1e2f7d7d55be2cf17bacb4a603",
+    "manifest": {
+      "cells": [
+        {
+          "id": "sensor.temp",
+          "kind": "value",
+          "stateHash": "dfb7c9a0071823d99d0b6a2c0313d5dfefac6b1f8fdee092bbd55327c0f30d2a"
+        },
+        {
+          "id": "sink.display",
+          "kind": "value",
+          "stateHash": "392b0906028cdb04f483d4263b0be122d7a7e6e542df5838a5564f6461847c7b"
+        }
+      ],
+      "edges": [],
+      "genesis": {
+        "prevHash": "GENESIS",
+        "seq": 0
+      },
+      "manifestHash": "e4ab110f2bd1ae8c0da8d62bf6e8456719d1c83514faf8f81e2522e2003d63c9",
+      "name": "chrono-demo",
+      "organId": "chrono-demo@ef28377edd1b07fc",
+      "receiptRange": {
+        "count": 7,
+        "end": 6,
+        "start": 0
+      },
+      "schema": "quilt.organ.manifest",
+      "schemaVersion": 1,
+      "state": {
+        "cellsSha256": "0d34686712a1ff0903c8877a4e11168c58f44ac1ab8a1512680d89cdbdb7a22e"
+      },
+      "supersedes": null
+    }
+  },
+  "links": [
+    {
+      "seq": 0,
+      "op": {
+        "by": "engine:init",
+        "cause": "init",
+        "cell": "sensor.temp",
+        "corrects": null,
+        "edge": null,
+        "flow_id": null,
+        "op": "write",
+        "pushed": false,
+        "seq": 0,
+        "ts_utc": "2026-01-01T00:00:00.001Z",
+        "value": 21.5
+      },
+      "prev": "GENESIS",
+      "hash": "82bd0137fbfb957673a4881f77c9f7626ef328a6e6d3148cef0f28a31ee55cae"
+    },
+    {
+      "seq": 1,
+      "op": {
+        "by": "agent:operator",
+        "cause": "pull",
+        "cell": "sensor.temp",
+        "corrects": null,
+        "edge": null,
+        "flow_id": null,
+        "op": "read",
+        "pushed": false,
+        "seq": 1,
+        "ts_utc": "2026-01-01T00:00:00.002Z",
+        "value": 21.5
+      },
+      "prev": "82bd0137fbfb957673a4881f77c9f7626ef328a6e6d3148cef0f28a31ee55cae",
+      "hash": "0d324359a3b5d5b3fa034c6eb3c335ecbf746853f6b8f90e9bf0eb23c2af1d75"
+    },
+    {
+      "seq": 2,
+      "op": {
+        "by": "agent:operator",
+        "cause": "set",
+        "cell": "sensor.temp",
+        "corrects": null,
+        "edge": null,
+        "flow_id": null,
+        "op": "write",
+        "pushed": false,
+        "seq": 2,
+        "ts_utc": "2026-01-01T00:00:00.003Z",
+        "value": 22.1
+      },
+      "prev": "0d324359a3b5d5b3fa034c6eb3c335ecbf746853f6b8f90e9bf0eb23c2af1d75",
+      "hash": "ff2656585fdf44010f65fc5273457eaf2936112956d67996cd721a80964c0037"
+    },
+    {
+      "seq": 3,
+      "op": {
+        "by": "push:sink.display",
+        "cause": "push",
+        "cell": "sensor.temp",
+        "corrects": null,
+        "edge": "sensor.temp->sink.display",
+        "flow_id": "flow-3-0",
+        "op": "read",
+        "pushed": true,
+        "seq": 3,
+        "ts_utc": "2026-01-01T00:00:00.004Z",
+        "value": 22.1
+      },
+      "prev": "ff2656585fdf44010f65fc5273457eaf2936112956d67996cd721a80964c0037",
+      "hash": "da642c1cb852bb1a431bb2156e55d8faa85ef2856c931b8ad06a7ac031f238bc"
+    },
+    {
+      "seq": 4,
+      "op": {
+        "by": "sensor.temp",
+        "cause": "push",
+        "cell": "sink.display",
+        "corrects": null,
+        "edge": "sensor.temp->sink.display",
+        "flow_id": "flow-3-0",
+        "op": "write",
+        "pushed": true,
+        "seq": 4,
+        "ts_utc": "2026-01-01T00:00:00.005Z",
+        "value": 22.1
+      },
+      "prev": "da642c1cb852bb1a431bb2156e55d8faa85ef2856c931b8ad06a7ac031f238bc",
+      "hash": "661c16b8744ac87ad678db1fdf6342a20bc0051c9d7d8640da7da08bed2d3fcc"
+    },
+    {
+      "seq": 5,
+      "op": {
+        "by": "agent:operator",
+        "cause": "pull",
+        "cell": "ghost.cell",
+        "corrects": null,
+        "edge": null,
+        "flow_id": null,
+        "op": "read",
+        "pushed": false,
+        "seq": 5,
+        "ts_utc": "2026-01-01T00:00:00.006Z",
+        "value": null
+      },
+      "prev": "661c16b8744ac87ad678db1fdf6342a20bc0051c9d7d8640da7da08bed2d3fcc",
+      "hash": "f094e84ae9f07a3c5f34972c8b0f16b3b8686e2e786f8546083730d81e956861"
+    },
+    {
+      "seq": 6,
+      "op": {
+        "by": "agent:operator",
+        "cause": "set",
+        "cell": "sink.display",
+        "corrects": null,
+        "edge": null,
+        "flow_id": null,
+        "op": "write",
+        "pushed": false,
+        "seq": 6,
+        "ts_utc": "2026-01-01T00:00:00.007Z",
+        "value": 22.4
+      },
+      "prev": "f094e84ae9f07a3c5f34972c8b0f16b3b8686e2e786f8546083730d81e956861",
+      "hash": "6e06042538527c6b58c011dc02a77c6db6b3c1cac547270a42c444da87901612"
+    }
+  ],
+  "expectedCellsAtTip": {
+    "sensor.temp": {
+      "kind": "value",
+      "value": 22.1
+    },
+    "sink.display": {
+      "kind": "value",
+      "value": 22.4
+    }
+  }
+}

@@ -6,7 +6,9 @@
 > groups of cells (organs), or entire quilts, as drop-ins that nest inside
 > another program or quilt. v0 = custody (snapshot/boot/nest); v1 = the rewind
 > family + write-side transactions (below); v2 = checkpoint signatures +
-> partial-custody replay seeds (`--from-checkpoint`, bottom).
+> partial-custody replay seeds (`--from-checkpoint`, bottom); §9 = the
+> chrono-op adapter — **a sealed quilt-chrono sheet boots as an organ**
+> (`bootChrono`, bottom).
 
 JEV is a hosted oracle that answers yes/no, multiple choice, and
 scored questions about content. It's deterministic (variance < 0.01
@@ -249,6 +251,52 @@ signature anchors the seed through two content-address hops
 the key. Honest scope (§8.3): the anchor vouches for the prefix;
 post-checkpoint custody is the v0 law (hash chain + replay == state). Ed25519
 (asymmetric "who vouches") is the v3 path.
+
+---
+
+## CHRONO BOOT — a time-traveling sheet boots as an organ (spec §9)
+
+quilt-chrono's sealed sheets — ledger + `<ledger>.chain.jsonl` sidecar +
+`seal()` — are now **boot()-able organs**. `src/organ/chronoOps.js` adapts
+the chrono chain into organ receipts (spec §9: reads → no-op witness
+receipts, writes → cell sets, pushes → the (witness, set) pair; every
+decision named and tested), and `bootChrono` runs the full courtroom: seal
+signature → anchor manifest → sidecar chain verify → boundary pin → mapping →
+replay == the SIGNED state → the REAL `boot()`.
+
+```bash
+# 0. the proof suite (60 tests: 44 v0–v2 + 16 chrono/§9)
+npm test                                    # node --test test/organ.test.mjs tests/chrono-interop.test.mjs
+
+# 1. BOOT A SEALED CHRONO SHEET (bundle = { links: <chain.jsonl links>, checkpoint: <seal> })
+node -e '
+import("./src/organ/chronoOps.js").then(async ({ bootChrono }) => {
+  const f = JSON.parse((await import("node:fs")).readFileSync("./tests/fixtures/chrono-fixture.json", "utf8"));
+  const organ = bootChrono({ links: f.links, checkpoint: f.checkpoint }, { key: f.key });
+  console.log(organ.manifest.organId, JSON.stringify(organ.cells));
+});'
+# → chrono-demo@ef28377edd1b07fc {"sensor.temp":{"kind":"value","value":22.1},"sink.display":{"kind":"value","value":22.4}}
+
+# 2. TIME TRAVEL — the organ verbs work on the chrono-born sheet
+#    stateAt(organ, t) / rewind(organ, t) == the chrono write-fold at t
+
+# 3. CUSTODY PROVENANCE — organ.custody = { kind: "chrono-seal", signedAt,
+#    sealedRange, verifiedRange, chainTip }
+#    Fail-closed: CHECKPOINT_SIGNATURE_INVALID (forged/wrong key),
+#    CHECKPOINT_SEQ_BEYOND_RECEIPTS (truncated sidecar),
+#    CUSTODY_CHECKPOINT_MISMATCH (wrong chain), CHECKPOINT_ANCHOR_MISMATCH
+#    (swapped anchor), REPLAY_DIVERGENCE (stale signed manifest),
+#    CHRONO_OP_UNMAPPABLE / CHRONO_FLOW_UNPAIRED (semantic refusals)
+
+# 4. REGENERATE THE FIXTURE (needs ../quilt-chrono present; test-only key)
+npm run fixture:chrono                       # scripts/vendor-chrono-fixture.mjs
+```
+
+The live interop test (`LIVE interop` in `tests/chrono-interop.test.mjs`)
+builds a sheet with chrono's own `Ledger`, seals it with chrono's own
+`seal()`, boots it here, and asserts equality with chrono's own
+`verifyCustody` — skip-if-absent, so this repo stays standalone. Doctrine:
+`docs/REVERSE-ACTUALIZED-SPEC.md` §9.
 
 ---
 
