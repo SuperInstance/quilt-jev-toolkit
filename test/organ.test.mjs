@@ -18,10 +18,11 @@ import {
 } from "../src/organ/manifest.mjs";
 import { makeQuilt, quiltApply, applyOp, verifyQuiltLedger } from "../src/organ/toyQuilt.mjs";
 import { snapshot, snapshotOrgan, cellsStateHash, cellStateHash } from "../src/organ/snapshot.mjs";
-import { boot, OrganBootError, verifyBundle, verifySignedCheckpoint } from "../src/organ/boot.mjs";
+import { boot, OrganBootError, verifyBundle, verifySignedCheckpoint, verifyCheckpointEd25519 } from "../src/organ/boot.mjs";
 import { nestInto, verifyDoubleEntry } from "../src/organ/nest.mjs";
 import { stateAt, rewind, transact, ORGAN_REWIND_TYPE } from "../src/organ/rewind.mjs";
-import { signCheckpoint, carvePartialCustody } from "../src/organ/checkpoint.mjs";
+import { signCheckpoint, carvePartialCustody, signCheckpointEd25519, carveRotatedCustody } from "../src/organ/checkpoint.mjs";
+import { generateEd25519Keypair, ed25519PublicKeyFingerprint } from "../src/organ/ed25519.mjs";
 import { buildGreeterQuilt, GREETER_FINAL_OUT, GREETER_RECEIPTS, GREETER_EDGES } from "../examples/greeter-organ.mjs";
 
 const GREETER_CELLS = ["greeting", "subject", "template", "out"];
@@ -1040,4 +1041,190 @@ test("v2 a partial-custody organ nests: double-entry audits over the seed-aware 
   const b2 = snapshotOrgan(organ);
   const organ2 = boot(b2, { checkpointKey: CP_KEY });
   assert.equal(organ2.cells.out.value, "Salutations, nested-v2!");
+});
+
+// ===========================================================================
+// v3 (lane 68-b) — Ed25519 attribution: the checkpoint signer has a name
+// ===========================================================================
+//
+// The attribution law (docs/REVERSE-ACTUALIZED-SPEC.md §10): v2's HMAC is
+// symmetric — every writer holds full signing power, so attribution is
+// fleet-trust, not identity. v3 splits the power with Ed25519 (node:crypto,
+// stdlib): the private key mints, the PUBLIC key verifies, and the checkpoint
+// NAMES its signer by publicKeyFingerprint (sha256 of the signer's SPKI PEM —
+// the same fingerprint law quilt-mcp-receipts' attribution layer uses, which
+// is what makes the cross-repo proof possible). Key rotation: a bundle may
+// carry a CHAIN of checkpoints — each key is checked against ITS era, and the
+// custody chain crosses key boundaries through the signed anchor states.
+
+const keygen = () => generateEd25519Keypair();
+
+test("v3 Ed25519 round-trip: sign → verify → carve → partial boot == full boot; custody provenance names the signer", () => {
+  const { privateKeyPem, publicKeyPem, publicKeyFingerprint } = keygen();
+  const full = full16();
+  const cp = signCheckpointEd25519(full, CP_SEQ, privateKeyPem);
+  assert.equal(cp.schema, "quilt.organ.checkpoint");
+  assert.equal(cp.alg, "Ed25519");
+  assert.equal(cp.seq, CP_SEQ);
+  assert.equal(cp.publicKeyFingerprint, publicKeyFingerprint, "the checkpoint names its signer");
+  assert.equal(cp.hash, full.receipts[CP_SEQ].hash);
+  assert.equal(verifyCheckpointEd25519(cp, publicKeyPem).ok, true);
+  assert.equal(verifySignedCheckpoint(cp, publicKeyPem).ok, true, "the v2 doorway verifies v3 checkpoints too");
+
+  const partial = carvePartialCustody(full, cp);
+  const organ = boot(partial, { checkpointKey: publicKeyPem });
+  assert.equal(canonicalJson(organ.cells), canonicalJson(boot(full).cells), "partial boot == full boot, byte-for-byte");
+  assert.equal(organ.custody.kind, "signed-checkpoint");
+  assert.equal(organ.custody.signedAt.alg, "Ed25519");
+  assert.deepEqual(organ.custody.signer, { kind: "ed25519", anchoredAt: CP_SEQ, publicKeyFingerprint });
+  assert.deepEqual(organ.custody.verifiedRange, { start: CP_SEQ + 1, end: full.manifest.receiptRange.end });
+  // HMAC checkpoints gain the honest-residual signer shape (a shared secret has NO name)
+  const v2Organ = boot(signedPartial().partial, { checkpointKey: CP_KEY });
+  assert.deepEqual(v2Organ.custody.signer, { kind: "hmac-sha256", anchoredAt: CP_SEQ });
+});
+
+test("v3 fingerprint law: sha256 of the normalized SPKI PEM — identical from the public or the private PEM", () => {
+  const { privateKeyPem, publicKeyPem, publicKeyFingerprint } = keygen();
+  assert.equal(ed25519PublicKeyFingerprint(publicKeyPem), publicKeyFingerprint);
+  assert.equal(ed25519PublicKeyFingerprint(privateKeyPem), publicKeyFingerprint, "the public half is derived before hashing");
+  assert.match(publicKeyFingerprint, /^[0-9a-f]{64}$/);
+  assert.notEqual(ed25519PublicKeyFingerprint(keygen().publicKeyPem), publicKeyFingerprint, "a different identity is a different name");
+});
+
+test("v3 forgery rejected by name: flipped sig, tampered signed fields, stripped fingerprint", () => {
+  const { privateKeyPem, publicKeyPem } = keygen();
+  const full = full16();
+  const cp = signCheckpointEd25519(full, CP_SEQ, privateKeyPem);
+  const flip = (s) => (s.endsWith("0") ? s.slice(0, -1) + "1" : s.slice(0, -1) + "0");
+
+  assert.equal(verifyCheckpointEd25519({ ...cp, sig: flip(cp.sig) }, publicKeyPem).code, "CHECKPOINT_SIGNATURE_INVALID");
+  // seq is INSIDE the signed triple: tampering it breaks the signature
+  const forgedSeqDoc = { ...cp, seq: CP_SEQ + 1, hash: full.receipts[CP_SEQ + 1].hash };
+  assert.equal(verifyCheckpointEd25519(forgedSeqDoc, publicKeyPem).code, "CHECKPOINT_SIGNATURE_INVALID");
+  assert.throws(() => carvePartialCustody(full, forgedSeqDoc), (e) => e.code === "CHECKPOINT_ANCHOR_MISMATCH");
+  // manifestHash tamper (the other half of the signed triple)
+  assert.equal(verifyCheckpointEd25519({ ...cp, manifestHash: flip(cp.manifestHash) }, publicKeyPem).code, "CHECKPOINT_SIGNATURE_INVALID");
+  // an Ed25519 checkpoint without its signer name is malformed, not unverified
+  const { publicKeyFingerprint, ...nameless } = cp;
+  assert.equal(verifyCheckpointEd25519(nameless, publicKeyPem).code, "CHECKPOINT_MALFORMED");
+});
+
+test("v3 wrong-key rejected: a different identity, or unusable key material, both refuse by name", () => {
+  const { privateKeyPem } = keygen();
+  const other = keygen();
+  const full = full16();
+  const cp = signCheckpointEd25519(full, CP_SEQ, privateKeyPem);
+  assert.equal(verifyCheckpointEd25519(cp, other.publicKeyPem).code, "CHECKPOINT_SIGNATURE_INVALID");
+  assert.match(verifyCheckpointEd25519(cp, other.publicKeyPem).detail, /wrong key/);
+  const { partial } = { partial: carvePartialCustody(full, cp) };
+  assert.equal(bootCode(partial, { checkpointKey: other.publicKeyPem }), "CHECKPOINT_SIGNATURE_INVALID");
+  assert.equal(verifyCheckpointEd25519(cp, "not-a-pem").code, "CHECKPOINT_SIGNATURE_INVALID");
+  // the private key verifies too (it derives the same public half) — but the
+  // trust root at boot is the verifier's PUBLIC key: zero shared secrets
+  assert.equal(verifyCheckpointEd25519(cp, privateKeyPem).ok, true);
+});
+
+test("v3 boot courtroom: unsigned gap still CUSTODY_GAP, no key still CHECKPOINT_SIGNATURE_REQUIRED, unknown alg still CHECKPOINT_MALFORMED", () => {
+  const { privateKeyPem, publicKeyPem } = keygen();
+  const full = full16();
+  const cp = signCheckpointEd25519(full, CP_SEQ, privateKeyPem);
+  const partial = carvePartialCustody(full, cp);
+  assert.equal(bootCode(barePartial(partial)), "CUSTODY_GAP");
+  assert.equal(bootCode(partial), "CHECKPOINT_SIGNATURE_REQUIRED");
+  assert.equal(verifyCheckpointEd25519({ ...cp, alg: "RSA-SHA256" }, publicKeyPem).code, "CHECKPOINT_MALFORMED");
+  assert.equal(bootCode(partial, { checkpointKey: publicKeyPem }), null, "the honest checkpoint boots");
+});
+
+test("v3 rotation chain (2 keys, 2 eras, HMAC→Ed25519) boots: each key checked against its own era", () => {
+  const era1 = keygen(); // the v2→v3 migration story: HMAC era, then Ed25519 era
+  const full = full16();
+  const cp1 = signCheckpoint(full, CP_SEQ, CP_KEY); // era 1: shared secret, seq 7
+  const cp2 = signCheckpointEd25519(full, 12, era1.privateKeyPem); // era 2: named key, seq 12
+  const partial = carveRotatedCustody(full, [cp1, cp2]);
+  assert.equal(partial.receipts[0].seq, CP_SEQ + 1);
+  assert.equal(partial.seed.seq, CP_SEQ);
+  assert.equal(partial.checkpoints.length, 2);
+
+  const organ = boot(partial, { checkpointKeys: [CP_KEY, era1.publicKeyPem] });
+  assert.equal(canonicalJson(organ.cells), canonicalJson(boot(full).cells), "rotation boot == full boot, byte-for-byte");
+  assert.deepEqual(organ.custody.signers, [
+    { kind: "hmac-sha256", anchoredAt: CP_SEQ },
+    { kind: "ed25519", anchoredAt: 12, publicKeyFingerprint: era1.publicKeyFingerprint },
+  ], "the chain of custody carries the signer NAMES across the key boundary");
+  assert.equal(organ.custody.signer.kind, "hmac-sha256", "era 0 anchored the carried seed");
+  // the era-2 seed query answers hash-equal to the full bundle (replay floor moved to seq 12)
+  assert.equal(stateAt(organ, 12).stateHash, stateAt(boot(full), 12).stateHash);
+});
+
+test("v3 rotation wrong-era keys refuse: swapped keys, missing keys", () => {
+  const era1 = keygen();
+  const full = full16();
+  const cp1 = signCheckpoint(full, CP_SEQ, CP_KEY);
+  const cp2 = signCheckpointEd25519(full, 12, era1.privateKeyPem);
+  const partial = carveRotatedCustody(full, [cp1, cp2]);
+  // era 0 verified with era 1's public key → HMAC under the wrong secret
+  assert.equal(bootCode(partial, { checkpointKeys: [era1.publicKeyPem, CP_KEY] }), "CHECKPOINT_SIGNATURE_INVALID");
+  // a genuine but WRONG Ed25519 key for era 2
+  assert.equal(bootCode(partial, { checkpointKeys: [CP_KEY, keygen().publicKeyPem] }), "CHECKPOINT_SIGNATURE_INVALID");
+  // one key for two eras → refused before any signature check
+  assert.equal(bootCode(partial, { checkpointKey: CP_KEY }), "CHECKPOINT_SIGNATURE_REQUIRED");
+  // both checkpoints under one Ed25519 identity: also a legal rotation
+  const solo = keygen();
+  const cpA = signCheckpointEd25519(full, CP_SEQ, solo.privateKeyPem);
+  const cpB = signCheckpointEd25519(full, 12, solo.privateKeyPem);
+  const organ = boot(carveRotatedCustody(full, [cpA, cpB]), { checkpointKeys: [solo.publicKeyPem, solo.publicKeyPem] });
+  assert.deepEqual(organ.custody.signers.map((s) => s.kind), ["ed25519", "ed25519"]);
+});
+
+test("v3 rotation tamper: the era bridge catches what the chain law cannot", () => {
+  const era1 = keygen();
+  const full = full16();
+  const cp1 = signCheckpoint(full, CP_SEQ, CP_KEY);
+  const cp2 = signCheckpointEd25519(full, 12, era1.privateKeyPem);
+  const partial = carveRotatedCustody(full, [cp1, cp2]);
+
+  // (a) naive tail tamper → the hash chain catches it (v0 law, unchanged)
+  const t1 = JSON.parse(canonicalJson(partial));
+  t1.receipts[5].op.value = "FORGED";
+  assert.equal(bootCode(t1, { checkpointKeys: [CP_KEY, era1.publicKeyPem] }), "RECEIPT_HASH_MISMATCH");
+
+  // (b) SELF-CONSISTENT re-hash inside era 1 (between the anchors): the chain
+  //     verifies, but era 2's signed anchor state no longer matches what era
+  //     1's custody proves — the key boundary is a tripwire.
+  const t2 = JSON.parse(canonicalJson(partial));
+  t2.receipts[2].op.value = "FLEET"; // seq 10 — inside era 1's window (8..12)
+  for (let i = 2; i < t2.receipts.length; i++) {
+    if (i > 2) t2.receipts[i].prev = t2.receipts[i - 1].hash;
+    t2.receipts[i].hash = receiptHash(t2.receipts[i]);
+  }
+  t2.manifest.manifestHash = computeManifestHash(t2.manifest);
+  assert.equal(bootCode(t2, { checkpointKeys: [CP_KEY, era1.publicKeyPem] }), "CUSTODY_CHECKPOINT_MISMATCH");
+});
+
+test("v3 re-snapshot: an Ed25519 partial-custody organ stays bootable under the same public key", () => {
+  const { privateKeyPem, publicKeyPem } = keygen();
+  const full = full16();
+  const cp = signCheckpointEd25519(full, CP_SEQ, privateKeyPem);
+  const organ = boot(carvePartialCustody(full, cp), { checkpointKey: publicKeyPem });
+  organ.append({ type: "set", cellId: "subject", value: "post-v3" });
+  const b2 = snapshotOrgan(organ);
+  const organ2 = boot(b2, { checkpointKey: publicKeyPem });
+  assert.equal(organ2.cells.subject.value, "post-v3");
+  assert.equal(organ2.custody.signer.kind, "ed25519");
+  assert.equal(organ2.custody.signer.publicKeyFingerprint, cp.publicKeyFingerprint);
+});
+
+test("v3 mint refuses: unproven snapshots, partial-custody sources, unusable keys", () => {
+  const { privateKeyPem } = keygen();
+  const full = full16();
+  const cp = signCheckpoint(full, CP_SEQ, CP_KEY);
+  const partial = carvePartialCustody(full, cp);
+  assert.throws(() => signCheckpointEd25519(partial, 12, privateKeyPem), (e) => e.code === "CHECKPOINT_MINT_INVALID");
+  const tampered = JSON.parse(canonicalJson(full));
+  tampered.receipts[3].op.value = "EVIL";
+  assert.throws(() => signCheckpointEd25519(tampered, CP_SEQ, privateKeyPem), (e) => e.code === "RECEIPT_HASH_MISMATCH",
+    "the FULL boot courtroom runs before any signature exists");
+  assert.throws(() => signCheckpointEd25519(full, 99, privateKeyPem), (e) => e.code === "CHECKPOINT_SEQ_OUT_OF_RANGE");
+  assert.throws(() => signCheckpointEd25519(full, CP_SEQ, "not-a-key"), (e) => e.code === "CHECKPOINT_MINT_INVALID");
+  assert.throws(() => signCheckpointEd25519(full, CP_SEQ, ""), (e) => e.code === "CHECKPOINT_SIGNATURE_REQUIRED");
 });

@@ -1,0 +1,60 @@
+{
+  "demo": "v3-attribution-demo",
+  "lane": "68-b (completed by 68-b-r2)",
+  "repos": [
+    "quilt-jev-toolkit (organ v3)",
+    "quilt-mcp-receipts (qmr2 attribution §8)"
+  ],
+  "identityFingerprint": "d07553378ac3e88e06c8fb327bc765fa376ecdf896d8a294457aba8869462631",
+  "checkpoint": {
+    "seq": 6,
+    "hash": "3c086cf83967158d88b62cf356abd1a5e5714e26e52dfeca2427a4a3bd2ab058",
+    "manifestHash": "653ab27cb56b830dcba54e9edeba16dd28a9855022dc2412e889821e9f558d29",
+    "alg": "Ed25519",
+    "sig": "76a4cafb581630dab02c2c4d3134a403e4b70d7c96382c8b8f3a936378102e0e59f9d2f90c06c4f0670ea9da6916c2fcced447c59319c9cbd5e93d9daae0cc01"
+  },
+  "qmr2Rows": [
+    {
+      "seq": 1,
+      "id": "dbd8b8c429571106f068c1c90753a8580b0c82874fda5e02e3ba68768df79bd0",
+      "sigAlg": "ed25519",
+      "sigKeyFp": "d07553378ac3e88e06c8fb327bc765fa376ecdf896d8a294457aba8869462631",
+      "sig": "a269e957645a2b01d58bb5f31259a8970d5d12e7d05be9184a443e1a5e382ea8bac89e4db39be7b9d03f3ae8ad9acd71de7a3b99499cb40d324957047abb0e03"
+    },
+    {
+      "seq": 2,
+      "id": "d793df44e77e5428dadcd76a333835d5b28ecaa6ac8a342d00ce6e9adc650d71",
+      "sigAlg": "ed25519",
+      "sigKeyFp": "d07553378ac3e88e06c8fb327bc765fa376ecdf896d8a294457aba8869462631",
+      "sig": "cb20329e8f464173aec44b094c064d995ea0ff907f12d0c0cc42ee8f21ac6b79f4b9bed9429f3968fe15ddeed1720c70e3f1344ecdb60ba3774f37f337cb290d"
+    }
+  ],
+  "receiptHash": "48dbb6db21eca0f1ae9972d8369b57d8772379e4eace722733af7ba0a7d8da5d",
+  "stages": [
+    {
+      "stage": "1.identity",
+      "ok": true,
+      "detail": "fingerprint=d07553378ac3e88e… (sha256 of the SPKI PEM)"
+    },
+    {
+      "stage": "2.sign-checkpoint",
+      "ok": true,
+      "detail": "alg=Ed25519 seq=6 triple={hash, manifestHash, seq} named d07553378ac3…"
+    },
+    {
+      "stage": "3.boot-custody",
+      "ok": true,
+      "detail": "custody.signer={kind:\"ed25519\", publicKeyFingerprint:d07553378ac3…}"
+    },
+    {
+      "stage": "4.mint-qmr2-rows",
+      "ok": true,
+      "detail": "2 qmr2 rows, sigs 128-hex, sigKeyFp = the SAME fingerprint as the checkpoint"
+    },
+    {
+      "stage": "5.cross-repo-verify",
+      "ok": true,
+      "detail": "rows verify under the shared fingerprint law; forged sig false; unknown fingerprint would be E_UNKNOWN_SIGNER"
+    }
+  ]
+}

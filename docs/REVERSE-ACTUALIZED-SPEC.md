@@ -260,7 +260,8 @@ double-entry auditing.
 - **Checkpoint signatures / PKI** — ~~`trustedCheckpoint` is still an unpinned
   `{seq, hash}` pair; signatures (who vouches for the anchor) are
   unimplemented~~ **DELIVERED in v2 (§8)** — HMAC-SHA256 over
-  `(manifestHash, chainTip, seq)`; asymmetric PKI remains parked (§8.5).
+  `(manifestHash, chainTip, seq)`; asymmetric PKI ~~remains parked (§8.5)~~
+  **DELIVERED in v3 (§10)** — Ed25519 checkpoints with named signers.
 - **Organ split / merge** — one organ id splitting into two chains (or two
   merging); the rewind primitive is the substrate, the identity law is open.
 - **Partial-custody replay seeds** — ~~replay still starts from empty cells
@@ -398,10 +399,13 @@ provenance carried on the booted organ.
 
 **Parked (in demand order):**
 
-- **Ed25519 / real PKI** — HMAC is symmetric: verifier and minter share the
+- **Ed25519 / real PKI** — ~~HMAC is symmetric: verifier and minter share the
   key. Asymmetric signatures (who vouches) + key rotation + multi-checkpoint
   chains are the v3 path; `CHECKPOINT_MALFORMED` already refuses unknown algs
-  so the format can grow without drift.
+  so the format can grow without drift.~~ **DELIVERED in v3 (§10)** — Ed25519
+  checkpoints (`signCheckpointEd25519` / `verifyCheckpointEd25519`), named
+  signers, and rotation chains; what remains parked there is PKI
+  infrastructure (issuance/revocation), not the signature layer.
 - **Organ split / merge** — one organ id splitting into two chains (or two
   merging); the rewind primitive is the substrate, the identity law is open.
 - **Canonical binary encoding** — receipts/state are canonical JSON; a binary
@@ -587,4 +591,153 @@ New fail-closed codes (everything else reuses §4/§7/§8 codes verbatim):
   ledger proves values only — same law as the seal); O(tail) booting of a
   chrono sheet from the sealed seed (the mapped bundle replays from GENESIS;
   partial-custody carving needs a mapped-chain boundary pin, which the
-  mapped ops make possible in a future lane); Ed25519 (v3).
+  mapped ops make possible in a future lane); ~~Ed25519 (v3)~~ **DELIVERED in
+  §10** — a chrono seal is an organ-exact checkpoint doc, so it upgrades to an
+  Ed25519 signer with zero format drift (mint the seal checkpoint with
+  `signCheckpointEd25519` instead of HMAC; `bootChrono`'s verification doorway
+  is the same `verifySignedCheckpoint` dispatch).
+
+
+---
+
+## 10. v3 — Ed25519 attribution: the checkpoint signer has a name (wave-68, lane 68-b)
+
+§8.5's top parked item, landed as the quest-log's move #5 ("Ed25519 attribution
+so scars carry names"). HMAC's honest residual, receipted in §8: the keyholder
+is the minter and vice versa — every writer holds FULL signing power, so
+"who vouches" was fleet-trust, not identity. v3 splits the power with Ed25519
+(`node:crypto`, stdlib, zero deps): the private key mints, the public key
+verifies, and the public key HAS A NAME.
+
+### 10.1 The v3 checkpoint (`src/organ/ed25519.mjs` + `checkpoint.mjs`)
+
+`signCheckpointEd25519(bundle, seq, privateKeyPem)` runs the SAME discipline as
+v2's `signCheckpoint` — the FULL boot courtroom first (`verifyBundle`), then
+the prefix replay, then the same canonical triple — and signs it with Ed25519:
+
+```
+{ schema: "quilt.organ.checkpoint", schemaVersion: 1, alg: "Ed25519",
+  seq, hash, manifestHash,                      // the v2 triple, unchanged
+  publicKeyFingerprint: <sha256 of the signer's SPKI PEM, 64-hex>,
+  sig: <128-hex Ed25519 over canonical({hash, manifestHash, seq})>,
+  manifest: <the prefix snapshot's manifest, hash-addressed to manifestHash> }
+```
+
+**The fingerprint law** (shared byte-for-byte with quilt-mcp-receipts' qmr3
+attribution layer — the cross-repo proof leans on it): an identity's name is
+`sha256(SPKI-PEM(public key))`, where the PEM is the normalized
+`createPublicKey(...).export({type:"spki",format:"pem"})` output. The name is
+derivable from the private PEM too (the public half is derived first), stable
+across runs, and identical in both repos.
+
+### 10.2 Verification — the key HOLDS the trust
+
+`verifySignedCheckpoint(cp, key)` is the one doorway and now dispatches on
+`alg`: `HMAC-SHA256` → the v2 path (byte-identical); `Ed25519` → the key
+argument is the verifier's PUBLIC key PEM, and the law is three named
+refusals: unusable key material → `CHECKPOINT_SIGNATURE_INVALID` (the trust
+root itself is malformed); key fingerprint ≠ `cp.publicKeyFingerprint` →
+`CHECKPOINT_SIGNATURE_INVALID` ("wrong key" — the checkpoint names its signer,
+and a verifier holding a different key refuses BEFORE any crypto); signature
+fails → `CHECKPOINT_SIGNATURE_INVALID`. `verifyCheckpointEd25519(cp,
+publicKeyPem)` is the explicit v3 spelling of the same law. Unknown
+algorithms still refuse `CHECKPOINT_MALFORMED` — the v2-predicted growth slot,
+grown into without drift.
+
+### 10.3 Custody provenance gains a name
+
+Booted organs carry `custody.signer` — `{kind: "ed25519", anchoredAt,
+publicKeyFingerprint}` for v3, and `{kind: "hmac-sha256", anchoredAt}` for v2
+(no fingerprint: a shared secret has no name — the honest residual, now
+receipted IN the provenance). All other custody fields (`signedAt`,
+`verifiedRange`, `seed`, `checkpoint`) are unchanged.
+
+### 10.4 Key rotation — the era walk
+
+A bundle may carry a CHAIN of checkpoints (`bundle.checkpoints`, strictly
+ascending seq; minted under different keys, possibly different algorithms) via
+`carveRotatedCustody(full, checkpoints)` — keyless-mechanical like
+`carvePartialCustody`, refusing any checkpoint that does not describe the
+bundle's prefix at its own seq. The carried shape: receipts
+`[firstSeq+1..tip]`, ONE seed at `firstSeq`, all the checkpoints.
+
+Boot (`{ checkpointKeys: [k0, k1, ...] }`, one keying material per era)
+verifies each era with ITS key only:
+
+- **era 0** anchors the carried seed — the exact v2 law (sig → boundary pin →
+  anchor manifest → seed state);
+- **era i > 0** is proven by REPLAY from era i−1's anchor: replay
+  `(seqᵢ₋₁, seqᵢ]` from the previous era's anchored state, then the era-i
+  checkpoint must pin the carried receipt at `seqᵢ` and its signed anchor
+  manifest must claim EXACTLY the replayed state. A genuine key signing a
+  state the previous era cannot reach is `CUSTODY_CHECKPOINT_MISMATCH` — the
+  custody chain does not cross that key boundary.
+
+So custody crosses key rotations without any shared secret: era 1's trust is
+transitive through replay, and each key is checked against its own era. The
+provenance carries the full name chain: `custody.signers = [signer₀, signer₁,
+…]` (and `custody.signer = signer₀`, the seed's anchor). The HMAC→Ed25519
+rotation is the tested v2→v3 migration story.
+
+### 10.5 Fail-closed surface (v3 additions)
+
+| Code | Failure mode | Fail-closed rule |
+|------|--------------|------------------|
+| `CHECKPOINT_SIGNATURE_INVALID` | Ed25519 sig fails, wrong public key (fingerprint mismatch), unusable key material; rotation: any era's key/sig failing | refuse boot |
+| `CHECKPOINT_MALFORMED` | ed25519 doc missing/invalid `publicKeyFingerprint`, sig not 128-hex, unknown alg, `checkpoint` AND `checkpoints` both present, non-ascending rotation seqs, malformed `checkpoints` array | refuse boot / the operation |
+| `CHECKPOINT_SIGNATURE_REQUIRED` | no key for a singular checkpoint; era/key count mismatch on a rotation chain | refuse boot |
+| `CUSTODY_CHECKPOINT_MISMATCH` | (existing) rotation: era-i anchor pins a receipt hash the carried chain does not have, or claims a state era i−1's custody cannot reach — the era bridge is broken | refuse boot |
+| `CHECKPOINT_ANCHOR_MISMATCH` / `CHECKPOINT_SEQ_OUT_OF_RANGE` / `CHECKPOINT_MINT_INVALID` | carve-side rotation refusals (swapped prefix manifests, tip-anchored eras, unproven sources) | refuse the operation |
+
+### 10.6 v3 acceptance (proven by `node --test test/organ.test.mjs`; 54/54 with the v0–v2 sections, 70/70 with §9's chrono suite)
+
+1. Round-trip: sign → verify (both doorways) → carve → partial boot ==
+   full boot byte-for-byte; `custody.signer` names the fingerprint; v2 boots
+   gain `{kind:"hmac-sha256"}` signer provenance.
+2. Fingerprint law: identical from public or private PEM; 64-hex; different
+   identity → different name.
+3. Forgery: flipped sig / tampered `seq` (inside the triple) / tampered
+   `manifestHash` → `CHECKPOINT_SIGNATURE_INVALID`; stripped
+   `publicKeyFingerprint` → `CHECKPOINT_MALFORMED`.
+4. Wrong key: another identity refuses by name (naming "wrong key"); a
+   different-identity boot refuses; unusable PEM refuses.
+5. Courtroom invariants: unsigned gap still `CUSTODY_GAP`; no key still
+   `CHECKPOINT_SIGNATURE_REQUIRED`; unknown alg still `CHECKPOINT_MALFORMED`.
+6. Rotation (2 keys, 2 eras, HMAC→Ed25519) boots byte-identical to the full
+   bundle; `custody.signers` carries both names across the key boundary;
+   same-alg (Ed25519→Ed25519) rotation also boots.
+7. Rotation key discipline: swapped keys, wrong-era Ed25519 key, and missing
+   era keys all refuse by name.
+8. Rotation tamper: naive tail tamper → `RECEIPT_HASH_MISMATCH`; a
+   SELF-CONSISTENT re-hash inside era 1 → `CUSTODY_CHECKPOINT_MISMATCH` (the
+   era bridge catches what the chain law cannot).
+9. Re-snapshot: an Ed25519 partial-custody organ re-snapshots and boots under
+   the same public key, signer provenance intact.
+10. Mint discipline: unproven snapshots, partial-custody sources, out-of-range
+    boundaries, and unusable keys all refuse before any signature exists.
+
+### 10.7 Honest scope, inherited and new
+
+- **The v3 anchor vouches for the PREFIX exactly as v2's does** (§8.3's scope
+  paragraph unchanged): post-checkpoint custody is the v0 law; a fully
+  re-hashed post-checkpoint history is a different fork, not a detectable
+  forgery. What v3 adds is WHO vouched, not WHAT is vouched for.
+- **Key distribution is trust-on-first-use, receipted:** the protocol verifies
+  signatures under keys the verifier CHOOSES to hold; issuance, revocation,
+  and web-of-trust are PKI infrastructure, parked (§8.5's residual). A
+  rotation chain is only as trustworthy as the out-of-band knowledge that
+  era i's key legitimately succeeded era i−1's.
+- **The private PEM verifies** (`createPublicKey` derives the public half) —
+  convenient for tests; a verifier that holds a private key holds the
+  minter's power too, which is a trust-root choice, not a protocol break.
+  The cross-repo demo keeps the private key runtime-only and shares only the
+  public key + fingerprint.
+- **Re-snapshots carry the era-0 anchor only** (`snapshotOrgan` re-carries
+  `custody.checkpoint` = the seed's anchor + the seed): the re-snapshot boots
+  under era 0's key alone (weaker custody, still valid — era 0 legalizes the
+  whole carried gap). Propagating deeper rotation anchors through
+  re-snapshots is parked.
+- **Parked (in demand order):** organ-side keyrings (boot takes explicit
+  keys; the keyring {fingerprint → key} law lives on the qmr2 attribution
+  side and can port back in a later lane), revocation lists, checkpoint
+  expiry/validity windows, multi-signer (k-of-n) checkpoints.

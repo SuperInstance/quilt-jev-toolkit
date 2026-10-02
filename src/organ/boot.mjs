@@ -1,6 +1,7 @@
 // quilt-jev-toolkit — organ boot v0 (lane 63-c) + v2 partial custody (lane 65-b)
+//                           + v3 Ed25519 attribution + key rotation (lane 68-b)
 //
-// boot(bundle, { host?, trustedCheckpoint?, checkpointKey? }) → organ instance
+// boot(bundle, { host?, trustedCheckpoint?, checkpointKey?, checkpointKeys? }) → organ instance
 //
 // Spec (docs/REVERSE-ACTUALIZED-SPEC.md §2 + §8): boot is the courtroom where the
 // snapshot's custody claim is either PROVEN or THROWN OUT:
@@ -26,9 +27,24 @@
 // boundary (manifestHash, chainTip, seq). The signature anchors the seed
 // through two content-address hops: signed manifestHash → carried prefix
 // manifest → seed state hash. Unsigned gap = fail-closed (unchanged).
-// Ed25519 is the v3 path; unknown algorithms refuse (CHECKPOINT_MALFORMED).
+//
+// v3 attribution law (§10): the signer gets a NAME. An Ed25519 checkpoint is
+// verified through the SAME doorway — the public key IS the trust root (no
+// shared secret), the checkpoint names its signer by publicKeyFingerprint
+// (sha256 of the signer's SPKI PEM), and a key mismatch is a signature
+// failure, not a fallback. Key rotation: a bundle may carry a CHAIN of
+// checkpoints (bundle.checkpoints, ascending seq) — era 0 anchors the carried
+// seed; every later era's anchored state is proven by REPLAY from the previous
+// era's anchor, so each key is checked against its own era and the chain of
+// custody survives key rotation. Unknown algorithms refuse (CHECKPOINT_MALFORMED).
 
 import { createHmac } from "node:crypto";
+import {
+  ED25519_ALG,
+  ED25519_SIG_HEX,
+  ed25519PublicKeyFingerprint,
+  ed25519VerifyHex,
+} from "./ed25519.mjs";
 import {
   GENESIS,
   canonicalJson,
@@ -52,12 +68,14 @@ export class OrganBootError extends Error {
 }
 
 // ---------------------------------------------------------------------------
-// v2 checkpoint signatures — HMAC-SHA256 over (manifestHash, chainTip, seq)
+// checkpoint signatures — v2: HMAC-SHA256; v3: Ed25519 (attribution)
+// over (manifestHash, chainTip, seq)
 // ---------------------------------------------------------------------------
 
 export const CHECKPOINT_SCHEMA = "quilt.organ.checkpoint";
 export const CHECKPOINT_VERSION = 1;
-export const CHECKPOINT_ALG = "HMAC-SHA256"; // Ed25519 is the v3 path; refuse others
+export const CHECKPOINT_ALG = "HMAC-SHA256"; // v2 (shared secret — no signer identity)
+export { ED25519_ALG as CHECKPOINT_ALG_ED25519 }; // v3 (asymmetric — the key holds the trust)
 
 const HEX64 = /^[0-9a-f]{64}$/;
 
@@ -73,12 +91,48 @@ function hmacHex(key, payload) {
   return createHmac("sha256", k).update(payload, "utf8").digest("hex");
 }
 
+/** 4d shared (v2 era 0 + v3 rotation eras): the checkpoint's anchor manifest
+ *  must be a valid FULL-prefix manifest of the organ, ending exactly at the
+ *  checkpoint's seq, and re-hash to the SIGNED manifestHash. */
+function anchorManifestVerdict(cp, organId) {
+  const anchor = cp.manifest;
+  if (!anchor || typeof anchor !== "object" || Array.isArray(anchor)) {
+    return { ok: false, code: "CHECKPOINT_MALFORMED", detail: "signed checkpoint carries no prefix manifest — the replay seed cannot be anchored" };
+  }
+  const av = validateManifest(anchor);
+  if (!av.ok
+      || computeManifestHash(anchor) !== cp.manifestHash
+      || anchor.receiptRange.start !== 0
+      || anchor.receiptRange.end !== cp.seq
+      || anchor.genesis.seq !== 0
+      || anchor.genesis.prevHash !== GENESIS
+      || anchor.organId !== organId) {
+    return { ok: false, code: "CHECKPOINT_ANCHOR_MISMATCH", detail: `checkpoint prefix manifest does not re-hash to the signed manifestHash ${cp.manifestHash} (or is not a full-prefix manifest of organ ${organId} ending at seq ${cp.seq})` };
+  }
+  return { ok: true, anchor };
+}
+
+/** v3 custody provenance: WHO anchored this era. Ed25519 names its key by
+ *  fingerprint (identity); a shared-secret HMAC has no name — every writer
+ *  holds full signing power, so attribution is fleet-trust (the honest
+ *  residual, now receipted in the provenance itself). */
+function signerOf(cp) {
+  return cp.alg === ED25519_ALG
+    ? { kind: "ed25519", anchoredAt: cp.seq, publicKeyFingerprint: cp.publicKeyFingerprint }
+    : { kind: "hmac-sha256", anchoredAt: cp.seq };
+}
+
 /** Verify a SIGNED checkpoint document's structure and signature (no bundle
  *  needed). Returns { ok } or { ok:false, code, detail } with codes
- *  CHECKPOINT_MALFORMED / CHECKPOINT_SIGNATURE_INVALID. */
+ *  CHECKPOINT_MALFORMED / CHECKPOINT_SIGNATURE_REQUIRED /
+ *  CHECKPOINT_SIGNATURE_INVALID.
+ *
+ *  The key is alg-relative keying material: for v2 (HMAC-SHA256) the shared
+ *  secret; for v3 (Ed25519) the verifier's PUBLIC key PEM — the key HOLDS the
+ *  trust, and the checkpoint must name that key's fingerprint exactly. */
 export function verifySignedCheckpoint(cp, key) {
   if (key === undefined || key === null || key === "" || (typeof key === "object" && key.length === 0)) {
-    return { ok: false, code: "CHECKPOINT_SIGNATURE_REQUIRED", detail: "no usable checkpoint key was provided — an HMAC signature cannot verify without it" };
+    return { ok: false, code: "CHECKPOINT_SIGNATURE_REQUIRED", detail: "no usable checkpoint key was provided — a signed checkpoint cannot verify without its keying material" };
   }
   if (!cp || typeof cp !== "object" || Array.isArray(cp)) {
     return { ok: false, code: "CHECKPOINT_MALFORMED", detail: "checkpoint is not an object" };
@@ -86,8 +140,8 @@ export function verifySignedCheckpoint(cp, key) {
   if (cp.schema !== CHECKPOINT_SCHEMA || cp.schemaVersion !== CHECKPOINT_VERSION) {
     return { ok: false, code: "CHECKPOINT_MALFORMED", detail: `checkpoint schema ${JSON.stringify(cp.schema)}/${JSON.stringify(cp.schemaVersion)} not implemented (knows only ${CHECKPOINT_SCHEMA}/${CHECKPOINT_VERSION})` };
   }
-  if (cp.alg !== CHECKPOINT_ALG) {
-    return { ok: false, code: "CHECKPOINT_MALFORMED", detail: `checkpoint alg ${JSON.stringify(cp.alg)} not implemented (knows only ${CHECKPOINT_ALG}; Ed25519 is the v3 path)` };
+  if (cp.alg !== CHECKPOINT_ALG && cp.alg !== ED25519_ALG) {
+    return { ok: false, code: "CHECKPOINT_MALFORMED", detail: `checkpoint alg ${JSON.stringify(cp.alg)} not implemented (knows only ${CHECKPOINT_ALG} and ${ED25519_ALG}; anything else refuses fail-closed)` };
   }
   if (!Number.isInteger(cp.seq) || cp.seq < 0) {
     return { ok: false, code: "CHECKPOINT_MALFORMED", detail: `checkpoint seq must be a non-negative integer, got ${JSON.stringify(cp.seq)}` };
@@ -98,6 +152,29 @@ export function verifySignedCheckpoint(cp, key) {
   if (typeof cp.manifestHash !== "string" || !HEX64.test(cp.manifestHash)) {
     return { ok: false, code: "CHECKPOINT_MALFORMED", detail: "checkpoint manifestHash missing or not sha256 hex" };
   }
+  if (cp.alg === ED25519_ALG) {
+    // v3: the checkpoint NAMES its signer; the verifier's key must be exactly
+    // that key (fingerprint equality), then the signature must verify under it.
+    if (typeof cp.publicKeyFingerprint !== "string" || !HEX64.test(cp.publicKeyFingerprint)) {
+      return { ok: false, code: "CHECKPOINT_MALFORMED", detail: "ed25519 checkpoint carries no usable publicKeyFingerprint (expected 64-hex sha256 of the signer's SPKI PEM)" };
+    }
+    if (typeof cp.sig !== "string" || !ED25519_SIG_HEX.test(cp.sig)) {
+      return { ok: false, code: "CHECKPOINT_MALFORMED", detail: "checkpoint sig missing or not a 128-hex Ed25519 signature" };
+    }
+    let fp;
+    try {
+      fp = ed25519PublicKeyFingerprint(key);
+    } catch {
+      return { ok: false, code: "CHECKPOINT_SIGNATURE_INVALID", detail: "provided checkpoint key is not usable Ed25519 key material (PEM unparseable) — the trust root itself is malformed" };
+    }
+    if (fp !== cp.publicKeyFingerprint) {
+      return { ok: false, code: "CHECKPOINT_SIGNATURE_INVALID", detail: `checkpoint names signer ${cp.publicKeyFingerprint.slice(0, 12)}… but the provided key's fingerprint is ${fp.slice(0, 12)}… — wrong key` };
+    }
+    if (!ed25519VerifyHex(key, checkpointSigningPayload(cp), cp.sig)) {
+      return { ok: false, code: "CHECKPOINT_SIGNATURE_INVALID", detail: "Ed25519 signature does not verify under the provided public key — forged signature, tampered signed fields, or wrong key" };
+    }
+    return { ok: true };
+  }
   if (typeof cp.sig !== "string" || !HEX64.test(cp.sig)) {
     return { ok: false, code: "CHECKPOINT_MALFORMED", detail: "checkpoint sig missing or not sha256 hex" };
   }
@@ -105,6 +182,20 @@ export function verifySignedCheckpoint(cp, key) {
     return { ok: false, code: "CHECKPOINT_SIGNATURE_INVALID", detail: `HMAC-${CHECKPOINT_ALG} does not verify under the provided key — forged signature, tampered signed fields, or wrong key` };
   }
   return { ok: true };
+}
+
+/** The explicit v3 doorway: verify an Ed25519 checkpoint under a public key
+ *  PEM — the key HOLDS the trust, no shared secret exists. Same law as
+ *  verifySignedCheckpoint (which dispatches on alg); this is the named v3
+ *  spelling for verifiers that know which trust root they hold. */
+export function verifyCheckpointEd25519(cp, publicKeyPem) {
+  if (!cp || typeof cp !== "object" || Array.isArray(cp)) {
+    return { ok: false, code: "CHECKPOINT_MALFORMED", detail: "checkpoint is not an object" };
+  }
+  if (cp.alg !== ED25519_ALG) {
+    return { ok: false, code: "CHECKPOINT_MALFORMED", detail: `verifyCheckpointEd25519: checkpoint alg ${JSON.stringify(cp.alg)} is not ${ED25519_ALG} (use verifySignedCheckpoint for the alg-dispatching doorway)` };
+  }
+  return verifySignedCheckpoint(cp, publicKeyPem);
 }
 
 /** Verify a bundle without booting it: manifest + state hashes + chain +
@@ -198,50 +289,67 @@ export function verifyBundle(bundle, opts = {}) {
       fail("CHECKPOINT_SEED_MISMATCH", "bundle.seed carries no replay seed cells");
       return out;
     }
-    const cp = bundle.checkpoint ?? opts.trustedCheckpoint ?? null;
-    if (!cp) {
-      fail("CUSTODY_GAP", `receipt range starts at seq ${manifest.genesis.seq} with a replay seed but no checkpoint — an UNSIGNED gap is still unowned history`);
+    // v3 key rotation: bundle.checkpoints (ascending chain, one key per era)
+    // or the v2 singular bundle.checkpoint / opts.trustedCheckpoint. Both at
+    // once is a contradictory custody claim.
+    const hasSingular = (bundle.checkpoint ?? opts.trustedCheckpoint) !== undefined && (bundle.checkpoint ?? opts.trustedCheckpoint) !== null;
+    if (bundle.checkpoints !== undefined && hasSingular) {
+      fail("CHECKPOINT_MALFORMED", "bundle carries both `checkpoint` and `checkpoints` — contradictory custody claims");
       return out;
     }
-    if (opts.checkpointKey === undefined || opts.checkpointKey === null || opts.checkpointKey === "") {
-      fail("CHECKPOINT_SIGNATURE_REQUIRED", "partial custody needs the checkpoint key — the custody gap is legal only under a signature that covers the gap boundary");
+    let cps; // [{ cp, key }]
+    if (bundle.checkpoints !== undefined) {
+      if (!Array.isArray(bundle.checkpoints) || bundle.checkpoints.length === 0
+          || bundle.checkpoints.some((c) => !c || typeof c !== "object" || Array.isArray(c))) {
+        fail("CHECKPOINT_MALFORMED", "bundle.checkpoints must be a non-empty array of checkpoint objects");
+        return out;
+      }
+      for (let i = 1; i < bundle.checkpoints.length; i++) {
+        if (!Number.isInteger(bundle.checkpoints[i].seq) || !Number.isInteger(bundle.checkpoints[i - 1].seq)
+            || bundle.checkpoints[i].seq <= bundle.checkpoints[i - 1].seq) {
+          fail("CHECKPOINT_MALFORMED", `checkpoints must have strictly ascending seqs (era ${i - 1} anchors seq ${bundle.checkpoints[i - 1].seq}, era ${i} anchors ${JSON.stringify(bundle.checkpoints[i].seq)})`);
+          return out;
+        }
+      }
+      const keys = opts.checkpointKeys ?? (opts.checkpointKey !== undefined ? [opts.checkpointKey] : undefined);
+      if (!Array.isArray(keys) || keys.length !== bundle.checkpoints.length) {
+        fail("CHECKPOINT_SIGNATURE_REQUIRED", `rotation chain carries ${bundle.checkpoints.length} checkpoint eras but ${keys === undefined ? "no" : keys.length} keys were provided — every era needs its own keying material (HMAC secret or Ed25519 public key)`);
+        return out;
+      }
+      cps = bundle.checkpoints.map((cp, i) => ({ cp, key: keys[i] }));
+    } else {
+      const cp = bundle.checkpoint ?? opts.trustedCheckpoint ?? null;
+      if (!cp) {
+        fail("CUSTODY_GAP", `receipt range starts at seq ${manifest.genesis.seq} with a replay seed but no checkpoint — an UNSIGNED gap is still unowned history`);
+        return out;
+      }
+      if (opts.checkpointKey === undefined || opts.checkpointKey === null || opts.checkpointKey === "") {
+        fail("CHECKPOINT_SIGNATURE_REQUIRED", "partial custody needs the checkpoint key — the custody gap is legal only under a signature that covers the gap boundary");
+        return out;
+      }
+      cps = [{ cp, key: opts.checkpointKey }];
+    }
+
+    // 4a–4e, era 0: the signature anchors the carried seed (v2 law unchanged).
+    const c0 = cps[0].cp;
+    const sig0 = verifySignedCheckpoint(c0, cps[0].key);
+    if (!sig0.ok) {
+      fail(sig0.code, sig0.detail);
       return out;
     }
-    // 4a. the signature itself (structure + HMAC under the verifier's key)
-    const sig = verifySignedCheckpoint(cp, opts.checkpointKey);
-    if (!sig.ok) {
-      fail(sig.code, sig.detail);
+    if (c0.seq > manifest.receiptRange.end) {
+      fail("CHECKPOINT_SEQ_BEYOND_RECEIPTS", `checkpoint anchors seq ${c0.seq}, beyond the carried receipts (last seq ${manifest.receiptRange.end}) — there is no post-checkpoint receipt to verify against it`);
       return out;
     }
-    // 4b. the boundary must sit within the carried receipts ...
-    if (cp.seq > manifest.receiptRange.end) {
-      fail("CHECKPOINT_SEQ_BEYOND_RECEIPTS", `checkpoint anchors seq ${cp.seq}, beyond the carried receipts (last seq ${manifest.receiptRange.end}) — there is no post-checkpoint receipt to verify against it`);
+    if (c0.seq !== manifest.genesis.seq - 1 || c0.hash !== manifest.genesis.prevHash) {
+      fail("CUSTODY_CHECKPOINT_MISMATCH", `checkpoint {seq:${c0.seq}, hash:${c0.hash}} does not pin the first carried receipt's parent {seq:${manifest.genesis.seq - 1}, hash:${manifest.genesis.prevHash}}`);
       return out;
     }
-    // 4c. ... and pin the first carried receipt's parent exactly
-    if (cp.seq !== manifest.genesis.seq - 1 || cp.hash !== manifest.genesis.prevHash) {
-      fail("CUSTODY_CHECKPOINT_MISMATCH", `checkpoint {seq:${cp.seq}, hash:${cp.hash}} does not pin the first carried receipt's parent {seq:${manifest.genesis.seq - 1}, hash:${manifest.genesis.prevHash}}`);
+    const anchor0 = anchorManifestVerdict(c0, manifest.organId);
+    if (!anchor0.ok) {
+      fail(anchor0.code, anchor0.detail);
       return out;
     }
-    // 4d. the anchor manifest: content-addressed against the SIGNED manifestHash
-    //     — the signature anchors the seed through this second hash hop
-    const anchor = cp.manifest;
-    if (!anchor || typeof anchor !== "object" || Array.isArray(anchor)) {
-      fail("CHECKPOINT_MALFORMED", "signed checkpoint carries no prefix manifest — the replay seed cannot be anchored");
-      return out;
-    }
-    const av = validateManifest(anchor);
-    if (!av.ok
-        || computeManifestHash(anchor) !== cp.manifestHash
-        || anchor.receiptRange.start !== 0
-        || anchor.receiptRange.end !== cp.seq
-        || anchor.genesis.seq !== 0
-        || anchor.genesis.prevHash !== GENESIS
-        || anchor.organId !== manifest.organId) {
-      fail("CHECKPOINT_ANCHOR_MISMATCH", `checkpoint prefix manifest does not re-hash to the signed manifestHash ${cp.manifestHash} (or is not a full-prefix manifest of organ ${manifest.organId} ending at seq ${cp.seq})`);
-      return out;
-    }
-    // 4e. the seed: the state AT the boundary, anchored via the prefix manifest
     let seedHash;
     try {
       seedHash = cellsStateHash(partialSeed.cells);
@@ -249,18 +357,73 @@ export function verifyBundle(bundle, opts = {}) {
       fail("CHECKPOINT_SEED_MISMATCH", `seed state not canonicalizable: ${e.message}`);
       return out;
     }
-    if (partialSeed.seq !== cp.seq || seedHash !== anchor.state.cellsSha256) {
-      fail("CHECKPOINT_SEED_MISMATCH", partialSeed.seq !== cp.seq
-        ? `seed claims seq ${JSON.stringify(partialSeed.seq)}, checkpoint anchors seq ${cp.seq}`
-        : `seed state hash ${seedHash} does not match the signature-anchored prefix state ${anchor.state.cellsSha256} — the seed was tampered`);
+    if (partialSeed.seq !== c0.seq || seedHash !== anchor0.anchor.state.cellsSha256) {
+      fail("CHECKPOINT_SEED_MISMATCH", partialSeed.seq !== c0.seq
+        ? `seed claims seq ${JSON.stringify(partialSeed.seq)}, checkpoint anchors seq ${c0.seq}`
+        : `seed state hash ${seedHash} does not match the signature-anchored prefix state ${anchor0.anchor.state.cellsSha256} — the seed was tampered`);
       return out;
     }
     replayBase = JSON.parse(canonicalJson(partialSeed.cells));
+
+    // 4f. v3 ROTATION: every later era is proven by REPLAY from the previous
+    //     era's anchor — key_i is checked against ITS era only, and the chain
+    //     of custody crosses key boundaries through the signed anchor states.
+    const signers = [signerOf(c0)];
+    for (let i = 1; i < cps.length; i++) {
+      const cp = cps[i].cp;
+      const sig = verifySignedCheckpoint(cp, cps[i].key); // era i's key, era i's sig
+      if (!sig.ok) {
+        fail(sig.code, `rotation era ${i} (seq ${cp.seq}): ${sig.detail}`);
+        return out;
+      }
+      if (cp.seq > manifest.receiptRange.end) {
+        fail("CHECKPOINT_SEQ_BEYOND_RECEIPTS", `rotation era ${i} anchors seq ${cp.seq}, beyond the carried receipts (last seq ${manifest.receiptRange.end})`);
+        return out;
+      }
+      // replay (prev era boundary, this era boundary] from the era-i-1 anchor
+      const eraCells = JSON.parse(canonicalJson(replayBase));
+      for (const r of receipts) {
+        if (r.seq <= cps[i - 1].cp.seq) continue;
+        if (r.seq > cp.seq) break;
+        try {
+          applyOp(eraCells, r.op);
+        } catch (e) {
+          fail("REPLAY_INVALID_OP", `rotation era ${i}: replay failed at seq ${r.seq} (${r.op?.type}): ${e.message}`);
+          return out;
+        }
+      }
+      const idx = cp.seq - manifest.receiptRange.start;
+      if (cp.hash !== receipts[idx].hash) {
+        fail("CUSTODY_CHECKPOINT_MISMATCH", `rotation era ${i} checkpoint {seq:${cp.seq}, hash:${cp.hash}} does not pin the carried receipt at that seq (${receipts[idx].hash.slice(0, 12)}…) — genuine key, wrong chain`);
+        return out;
+      }
+      const av = anchorManifestVerdict(cp, manifest.organId);
+      if (!av.ok) {
+        fail(av.code, `rotation era ${i}: ${av.detail}`);
+        return out;
+      }
+      let eraHash;
+      try {
+        eraHash = cellsStateHash(eraCells);
+      } catch (e) {
+        fail("CUSTODY_CHECKPOINT_MISMATCH", `rotation era ${i}: replayed era state not canonicalizable: ${e.message}`);
+        return out;
+      }
+      if (eraHash !== av.anchor.state.cellsSha256) {
+        fail("CUSTODY_CHECKPOINT_MISMATCH", `rotation era ${i} (key ${i}) anchors state ${av.anchor.state.cellsSha256.slice(0, 12)}… at seq ${cp.seq}, but replay from era ${i - 1}'s anchored seed produces ${eraHash.slice(0, 12)}… — the custody chain does not cross this key boundary`);
+        return out;
+      }
+      replayBase = eraCells;
+      signers.push(signerOf(cp));
+    }
+
     out.custody = {
       kind: "signed-checkpoint",
-      anchoredAt: cp.seq,
-      signedAt: { seq: cp.seq, hash: cp.hash, manifestHash: cp.manifestHash, alg: cp.alg },
+      anchoredAt: c0.seq,
+      signedAt: { seq: c0.seq, hash: c0.hash, manifestHash: c0.manifestHash, alg: c0.alg },
       seedStateHash: seedHash,
+      signer: signers[0],
+      ...(cps.length > 1 ? { signers } : {}),
     };
   } else if (manifest.genesis.seq > 0) {
     const cp = opts.trustedCheckpoint;
@@ -312,8 +475,9 @@ export function verifyBundle(bundle, opts = {}) {
  * violated invariant; on success returns a live organ instance:
  * { organId, name, manifest, cells, ledger, host, nestReceipt, append(op) }.
  *
- * @param bundle { manifest, state, receipts, seed?, checkpoint? }
- * @param opts   { host?: quilt, trustedCheckpoint?: {seq, hash}|signedCp, checkpointKey?: string }
+ * @param bundle { manifest, state, receipts, seed?, checkpoint?, checkpoints? }
+ * @param opts   { host?: quilt, trustedCheckpoint?: {seq, hash}|signedCp,
+ *                 checkpointKey?: string|pem, checkpointKeys?: (string|pem)[] }
  */
 export function boot(bundle, opts = {}) {
   const verdict = verifyBundle(bundle, opts);
@@ -338,7 +502,8 @@ export function boot(bundle, opts = {}) {
   };
   // v2 partial custody: the organ carries its custody provenance — where the
   // signature anchored it, which range replay verified, and the seed cells
-  // (the replay floor for every later prefix query/rewind).
+  // (the replay floor for every later prefix query/rewind). v3: WHO anchored
+  // it — signer (era 0) and, under rotation, the full per-era signer chain.
   if (verdict.custody) {
     organ.custody = {
       kind: "signed-checkpoint",
@@ -349,8 +514,10 @@ export function boot(bundle, opts = {}) {
         cells: JSON.parse(canonicalJson(bundle.seed.cells)),
         stateHash: verdict.custody.seedStateHash,
       },
-      checkpoint: JSON.parse(canonicalJson(bundle.checkpoint ?? opts.trustedCheckpoint)),
+      checkpoint: JSON.parse(canonicalJson(bundle.checkpoint ?? opts.trustedCheckpoint ?? bundle.checkpoints[0])),
     };
+    if (verdict.custody.signer) organ.custody.signer = verdict.custody.signer;
+    if (verdict.custody.signers) organ.custody.signers = verdict.custody.signers;
   }
   organ.append = (op) => organAppend(organ, op);
 

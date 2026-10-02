@@ -1,9 +1,10 @@
-// quilt-jev-toolkit — organ checkpoint minting + partial-custody carving (v2, lane 65-b)
+// quilt-jev-toolkit — organ checkpoint minting + partial-custody carving
+// (v2, lane 65-b; v3 Ed25519 attribution + rotation carving, lane 68-b)
 //
-// Spec (docs/REVERSE-ACTUALIZED-SPEC.md §8): a checkpoint is a SIGNED custody
-// anchor. Minting replays the prefix once at checkpoint time and signs the
-// triple (manifestHash, chainTip, seq) with HMAC-SHA256 under the minter's
-// key (Ed25519 is the v3 path):
+// Spec (docs/REVERSE-ACTUALIZED-SPEC.md §8 + §10): a checkpoint is a SIGNED
+// custody anchor. Minting replays the prefix once at checkpoint time and signs
+// the triple (manifestHash, chainTip, seq) — v2 with HMAC-SHA256 under the
+// minter's key, v3 with Ed25519 under the minter's private key:
 //
 //   signCheckpoint(bundle, seq, key)
 //     → { schema: "quilt.organ.checkpoint", schemaVersion: 1, alg: "HMAC-SHA256",
@@ -39,6 +40,11 @@ import {
   CHECKPOINT_ALG,
   checkpointSigningPayload,
 } from "./boot.mjs";
+import {
+  ED25519_ALG,
+  ed25519PublicKeyFingerprint,
+  ed25519SignHex,
+} from "./ed25519.mjs";
 
 function hmacHex(key, payload) {
   if (key === undefined || key === null || key === "" || (typeof key === "object" && key.length === 0)) {
@@ -71,20 +77,10 @@ function prefixManifestOf(bundle, seq) {
   }).manifest;
 }
 
-/**
- * MINT a signed checkpoint: verify the bundle through the full boot courtroom
- * (fail-closed — never sign an unproven snapshot), replay the prefix once,
- * snapshot the prefix, and HMAC the triple (prefix manifestHash, chainTip at
- * seq, seq) under the key.
- *
- * @param bundle a FULL-custody bundle (genesis.seq === 0; a partial-custody
- *               bundle does not carry the prefix and cannot mint)
- * @param seq    boundary: last receipt the checkpoint covers (≤ tip; a
- *               checkpoint AT the tip is legal but covers the whole chain)
- * @param key    non-empty string or Buffer
- * @returns the signed checkpoint document (carries its prefix manifest)
- */
-export function signCheckpoint(bundle, seq, key) {
+/** Shared mint preamble (v2 + v3): the FULL boot courtroom runs BEFORE any
+ *  signature exists — never sign an unproven snapshot — then replay the
+ *  prefix once and snapshot it. Returns the prefix manifest. */
+function mintablePrefix(bundle, seq) {
   if (!bundle || typeof bundle !== "object" || !bundle.manifest) {
     throw new OrganBootError("CHECKPOINT_MINT_INVALID", "signCheckpoint: bundle is not an organ bundle {manifest, state, receipts}");
   }
@@ -102,8 +98,25 @@ export function signCheckpoint(bundle, seq, key) {
   if (!Number.isInteger(seq) || seq < start || seq > end) {
     throw new OrganBootError("CHECKPOINT_SEQ_OUT_OF_RANGE", `checkpoint boundary seq ${JSON.stringify(seq)} is outside the carried range [${start}, ${end}]`);
   }
+  return prefixManifestOf(bundle, seq);
+}
 
-  const prefix = prefixManifestOf(bundle, seq);
+/**
+ * MINT a signed checkpoint: verify the bundle through the full boot courtroom
+ * (fail-closed — never sign an unproven snapshot), replay the prefix once,
+ * snapshot the prefix, and HMAC the triple (prefix manifestHash, chainTip at
+ * seq, seq) under the key.
+ *
+ * @param bundle a FULL-custody bundle (genesis.seq === 0; a partial-custody
+ *               bundle does not carry the prefix and cannot mint)
+ * @param seq    boundary: last receipt the checkpoint covers (≤ tip; a
+ *               checkpoint AT the tip is legal but covers the whole chain)
+ * @param key    non-empty string or Buffer
+ * @returns the signed checkpoint document (carries its prefix manifest)
+ */
+export function signCheckpoint(bundle, seq, key) {
+  const prefix = mintablePrefix(bundle, seq);
+  const { start } = bundle.manifest.receiptRange;
   const cp = {
     schema: CHECKPOINT_SCHEMA,
     schemaVersion: CHECKPOINT_VERSION,
@@ -113,6 +126,47 @@ export function signCheckpoint(bundle, seq, key) {
     manifestHash: prefix.manifestHash,
   };
   cp.sig = hmacHex(key, checkpointSigningPayload(cp));
+  cp.manifest = freezeJson(prefix);
+  return cp;
+}
+
+/**
+ * MINT a v3 (Ed25519) checkpoint — the signer has a NAME. Same discipline as
+ * signCheckpoint (the FULL boot courtroom runs first; the same canonical
+ * triple is signed); the differences are the algorithm, the keying material
+ * (a private key, never a shared secret), and the additive
+ * `publicKeyFingerprint` field that names the signer for verifiers and
+ * custody provenance.
+ *
+ * @param bundle         a FULL-custody bundle (as signCheckpoint)
+ * @param seq            boundary: last receipt the checkpoint covers
+ * @param privateKeyPem  Ed25519 private key PEM (SPKI/PKCS8, node:crypto)
+ * @returns the signed checkpoint document:
+ *   { schema, schemaVersion, alg: "Ed25519", seq, hash, manifestHash,
+ *     publicKeyFingerprint, sig (128-hex), manifest }
+ */
+export function signCheckpointEd25519(bundle, seq, privateKeyPem) {
+  if (typeof privateKeyPem !== "string" || privateKeyPem.length === 0) {
+    throw new OrganBootError("CHECKPOINT_SIGNATURE_REQUIRED", "signCheckpointEd25519: signing needs an Ed25519 private key PEM");
+  }
+  let fingerprint;
+  try {
+    fingerprint = ed25519PublicKeyFingerprint(privateKeyPem); // the public half's name
+  } catch {
+    throw new OrganBootError("CHECKPOINT_MINT_INVALID", "signCheckpointEd25519: the provided key material is not a parseable Ed25519 key PEM");
+  }
+  const prefix = mintablePrefix(bundle, seq);
+  const { start } = bundle.manifest.receiptRange;
+  const cp = {
+    schema: CHECKPOINT_SCHEMA,
+    schemaVersion: CHECKPOINT_VERSION,
+    alg: ED25519_ALG,
+    seq,
+    hash: bundle.receipts[seq - start].hash,
+    manifestHash: prefix.manifestHash,
+    publicKeyFingerprint: fingerprint,
+  };
+  cp.sig = ed25519SignHex(privateKeyPem, checkpointSigningPayload(cp));
   cp.manifest = freezeJson(prefix);
   return cp;
 }
@@ -170,5 +224,74 @@ export function carvePartialCustody(bundle, checkpoint) {
   });
   partial.seed = freezeJson({ seq, cells: prefixCellsOf(bundle, idx) });
   partial.checkpoint = freezeJson(checkpoint);
+  return partial;
+}
+
+/**
+ * CARVE a v3 ROTATION bundle: given a full bundle and a chain of signed
+ * checkpoints (ascending seq, possibly under DIFFERENT keys/algorithms —
+ * the chain of custody across key rotations), produce the bundle that carries
+ * receipts [firstSeq+1..tip] + the seed at firstSeq + ALL the checkpoints.
+ * Keyless and mechanical, like carvePartialCustody: every checkpoint must
+ * describe THIS bundle's prefix at its own seq exactly, or the carve refuses.
+ *
+ * Booting the result (`boot(partial, { checkpointKeys: [...] })`) verifies
+ * each era with ITS key: era 0 anchors the carried seed; every later era's
+ * anchored state is proven by replay from the previous era's anchor (see
+ * boot.mjs step 4f).
+ *
+ * @param checkpoints non-empty array of signed checkpoint documents, strictly
+ *                    ascending seq, last one strictly below the chain tip
+ * @returns the partial bundle { manifest, state, receipts, seed, checkpoints }
+ */
+export function carveRotatedCustody(bundle, checkpoints) {
+  if (!bundle || typeof bundle !== "object" || !bundle.manifest) {
+    throw new OrganBootError("CHECKPOINT_MINT_INVALID", "carveRotatedCustody: bundle is not an organ bundle {manifest, state, receipts}");
+  }
+  if (bundle.manifest.genesis.seq !== 0) {
+    throw new OrganBootError("CHECKPOINT_MINT_INVALID", `cannot carve from a partial-custody bundle (genesis.seq ${bundle.manifest.genesis.seq}) — the full chain is needed to re-derive the seed`);
+  }
+  const verdict = verifyBundle(bundle);
+  if (!verdict.ok) {
+    const first = verdict.errors[0];
+    const err = new OrganBootError(first.code, `carveRotatedCustody: refusing to carve an unproven snapshot — ${verdict.errors.map((e) => `[${e.code}] ${e.detail}`).join(" | ")}`);
+    err.errors = verdict.errors;
+    throw err;
+  }
+  if (!Array.isArray(checkpoints) || checkpoints.length === 0
+      || checkpoints.some((c) => !c || typeof c !== "object" || Array.isArray(c))) {
+    throw new OrganBootError("CHECKPOINT_MALFORMED", "carveRotatedCustody: checkpoints must be a non-empty array of checkpoint objects");
+  }
+  const { start, end } = bundle.manifest.receiptRange;
+  for (let i = 0; i < checkpoints.length; i++) {
+    const seq = checkpoints[i].seq;
+    if (!Number.isInteger(seq) || seq < start || seq >= end) {
+      throw new OrganBootError("CHECKPOINT_SEQ_OUT_OF_RANGE", seq === end
+        ? `rotation era ${i} anchors the chain tip (seq ${seq}) — there are no post-checkpoint receipts to carry; boot the full bundle instead`
+        : `rotation era ${i} boundary seq ${JSON.stringify(seq)} is outside the carvable range [${start}, ${end - 1}]`);
+    }
+    if (i > 0 && seq <= checkpoints[i - 1].seq) {
+      throw new OrganBootError("CHECKPOINT_MALFORMED", `checkpoints must have strictly ascending seqs (era ${i - 1} anchors seq ${checkpoints[i - 1].seq}, era ${i} anchors ${seq})`);
+    }
+  }
+  for (let i = 0; i < checkpoints.length; i++) {
+    const seq = checkpoints[i].seq;
+    const prefix = prefixManifestOf(bundle, seq);
+    if (canonicalJson(prefix) !== canonicalJson(checkpoints[i].manifest ?? null)
+        || checkpoints[i].manifestHash !== prefix.manifestHash
+        || checkpoints[i].hash !== bundle.receipts[seq - start].hash) {
+      throw new OrganBootError("CHECKPOINT_ANCHOR_MISMATCH", `rotation era ${i} checkpoint does not describe this bundle's prefix at seq ${seq} — wrong chain, wrong boundary, or a swapped prefix manifest`);
+    }
+  }
+
+  const firstIdx = checkpoints[0].seq - start;
+  const partial = snapshot(bundle.state.cells, bundle.receipts.slice(firstIdx + 1), {
+    name: bundle.manifest.name,
+    organId: bundle.manifest.organId,
+    edges: bundle.manifest.edges,
+    supersedes: bundle.manifest.manifestHash, // honest lineage: carved from this manifest
+  });
+  partial.seed = freezeJson({ seq: checkpoints[0].seq, cells: prefixCellsOf(bundle, firstIdx) });
+  partial.checkpoints = freezeJson(checkpoints);
   return partial;
 }

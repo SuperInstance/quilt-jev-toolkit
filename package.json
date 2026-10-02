@@ -2,7 +2,7 @@
   "name": "quilt-jev-toolkit",
   "version": "0.1.0",
   "private": true,
-  "description": "JEV canon-oracle toolkit for Quilt + the Cell-Organ Snapshot & Boot protocol (v0 custody + v1 rewind family/transactions + v2 checkpoint signatures & partial custody). No external deps; Node >= 18.",
+  "description": "JEV canon-oracle toolkit for Quilt + the Cell-Organ Snapshot & Boot protocol (v0 custody + v1 rewind family/transactions + v2 checkpoint signatures & partial custody + v3 Ed25519 attribution & key rotation). No external deps; Node >= 18.",
   "type": "module",
   "scripts": {
     "test": "node --test test/organ.test.mjs tests/chrono-interop.test.mjs",

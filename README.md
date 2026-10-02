@@ -6,9 +6,10 @@
 > groups of cells (organs), or entire quilts, as drop-ins that nest inside
 > another program or quilt. v0 = custody (snapshot/boot/nest); v1 = the rewind
 > family + write-side transactions (below); v2 = checkpoint signatures +
-> partial-custody replay seeds (`--from-checkpoint`, bottom); §9 = the
-> chrono-op adapter — **a sealed quilt-chrono sheet boots as an organ**
-> (`bootChrono`, bottom).
+> partial-custody replay seeds (`--from-checkpoint`, bottom); v3 = Ed25519
+> attribution — **the checkpoint signer has a name** (`signCheckpointEd25519`,
+> key rotation, bottom); §9 = the chrono-op adapter — **a sealed quilt-chrono
+> sheet boots as an organ** (`bootChrono`, bottom).
 
 JEV is a hosted oracle that answers yes/no, multiple choice, and
 scored questions about content. It's deterministic (variance < 0.01
@@ -98,7 +99,8 @@ Boot throws `OrganBootError` (never partially boots) on: `SCHEMA_DRIFT`,
 _HASH_MISMATCH / _STATE_MISMATCH` and never auto-repairs.
 
 Proofs: `test/organ.test.mjs` (23/23 v0; 34/34 with the v1 section; 44/44 with
-the v2 section below) — including a self-consistent *forged*
+the v2 section; 54/54 with the v3 section, further below) — including a
+self-consistent *forged*
 chain (re-hashed by an attacker) that only replay can catch, and a forged host
 credit caught by double-entry. Evidence receipt: `examples/receipts/boot-demo-receipt.json`.
 
@@ -250,7 +252,7 @@ signature anchors the seed through two content-address hops
 (`sig → manifestHash → prefix manifest → seed state`); the only trust input is
 the key. Honest scope (§8.3): the anchor vouches for the prefix;
 post-checkpoint custody is the v0 law (hash chain + replay == state). Ed25519
-(asymmetric "who vouches") is the v3 path.
+attribution ("who vouches") is v3, below.
 
 ---
 
@@ -265,7 +267,7 @@ signature → anchor manifest → sidecar chain verify → boundary pin → mapp
 replay == the SIGNED state → the REAL `boot()`.
 
 ```bash
-# 0. the proof suite (60 tests: 44 v0–v2 + 16 chrono/§9)
+# 0. the proof suite (70 tests: 54 v0–v3 + 16 chrono/§9)
 npm test                                    # node --test test/organ.test.mjs tests/chrono-interop.test.mjs
 
 # 1. BOOT A SEALED CHRONO SHEET (bundle = { links: <chain.jsonl links>, checkpoint: <seal> })
@@ -297,6 +299,61 @@ builds a sheet with chrono's own `Ledger`, seals it with chrono's own
 `seal()`, boots it here, and asserts equality with chrono's own
 `verifyCustody` — skip-if-absent, so this repo stays standalone. Doctrine:
 `docs/REVERSE-ACTUALIZED-SPEC.md` §9.
+
+---
+
+## ORGAN BOOT v3 — Ed25519 attribution: the checkpoint signer has a name
+
+v2's HMAC is symmetric: every writer holds full signing power, so attribution
+was fleet-trust, not identity. v3 splits the power with Ed25519 (node:crypto,
+stdlib, zero deps) — the private key mints, the PUBLIC key verifies, and the
+checkpoint NAMES its signer by `publicKeyFingerprint` (sha256 of the signer's
+SPKI PEM — the same fingerprint law quilt-mcp-receipts' attribution layer
+uses, which is what makes the cross-repo demo possible). Doctrine: spec §10.
+
+```bash
+# 0. the proof suite (54 tests incl. 10 v3)
+npm test
+
+# 1. MINT — the FULL boot courtroom runs first, then Ed25519 over the same
+#    canonical triple (hash, manifestHash, seq) as v2
+node -e '
+Promise.all([import("./src/organ/checkpoint.mjs"), import("./src/organ/ed25519.mjs"), import("./src/organ/snapshot.mjs"), import("./examples/greeter-organ.mjs")])
+  .then(async ([{ signCheckpointEd25519 }, { generateEd25519Keypair }, { snapshot }, { buildGreeterQuilt }]) => {
+    const id = generateEd25519Keypair();                 // runtime keys — never committed
+    const q = buildGreeterQuilt();
+    const cp = signCheckpointEd25519(snapshot(q.cells, q.ledger, { name: "greeter-organ" }), 7, id.privateKeyPem);
+    console.log(cp.alg, cp.publicKeyFingerprint.slice(0, 16), cp.sig.slice(0, 16));
+  });'
+
+# 2. VERIFY — the key HOLDS the trust (no shared secret exists)
+#    verifyCheckpointEd25519(cp, publicKeyPem) → { ok } | { ok:false, code, detail }
+#    (verifySignedCheckpoint dispatches on alg — one doorway, v2+v3)
+#    Fail-closed: CHECKPOINT_SIGNATURE_INVALID (forged / wrong key /
+#    unusable key material), CHECKPOINT_MALFORMED (unknown alg, missing
+#    fingerprint), CHECKPOINT_SIGNATURE_REQUIRED (no key)
+
+# 3. ROTATE — a bundle may carry MULTIPLE valid checkpoints under different
+#    keys (chain of custody across key rotations; each key checks ITS era):
+#    cp1 = signCheckpoint(full, 7, hmacKey); cp2 = signCheckpointEd25519(full, 12, priv2)
+#    partial = carveRotatedCustody(full, [cp1, cp2])
+#    boot(partial, { checkpointKeys: [hmacKey, publicKey2] })
+#    → custody.signers = [{kind:"hmac-sha256",...}, {kind:"ed25519", publicKeyFingerprint}]
+#    Later eras are proven by REPLAY from the previous era's anchor — a genuine
+#    key signing an unreachable state refuses CUSTODY_CHECKPOINT_MISMATCH.
+
+# 4. CROSS-REPO PROOF — one Ed25519 identity signs an organ checkpoint AND the
+#    qmr2 attribution rows; each repo's verifier checks the other's artifact
+#    (zero shared secrets — only the public key travels):
+#    node examples/v3-attribution-demo.mjs verify
+```
+
+Custody provenance gains a name: `organ.custody.signer = { kind: "ed25519",
+anchoredAt, publicKeyFingerprint }` (v2 organs carry `{ kind:
+"hmac-sha256", anchoredAt }` — a shared secret has no name, the honest
+residual, receipted in the provenance itself). Honest scope (§10.7): the
+anchor vouches for the prefix exactly as v2's does; key distribution is
+trust-on-first-use; issuance/revocation remain parked.
 
 ---
 
