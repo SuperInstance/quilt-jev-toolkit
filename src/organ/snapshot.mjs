@@ -116,12 +116,25 @@ export function snapshot(cells, ledger, opts = {}) {
  * Re-snapshot a booted organ (or any quilt-like {cells, ledger, manifest?})
  * into a fresh portable bundle: same identity, full organ-local chain,
  * `supersedes` pinned to the prior manifestHash when known.
+ *
+ * v2: an organ booted from a SIGNED checkpoint carries its custody
+ * (`organ.custody`); the re-snapshot keeps the custody claim bootable by
+ * carrying the seed + signed checkpoint forward (the range still starts at
+ * the custody floor — rewind never crosses it, so the anchor stays valid).
  */
 export function snapshotOrgan(organ, opts = {}) {
-  return snapshot(organ.cells, organ.ledger, {
+  const bundle = snapshot(organ.cells, organ.ledger, {
     name: opts.name ?? organ.manifest.name,
     organId: opts.organId ?? organ.manifest.organId,
     edges: opts.edges ?? organ.manifest.edges,
     supersedes: opts.supersedes === false ? null : (organ.manifest?.manifestHash ?? null),
   });
+  const custody = organ.custody;
+  if (custody && custody.kind === "signed-checkpoint"
+      && organ.ledger.length > 0
+      && organ.ledger[0].seq === custody.verifiedRange.start) {
+    bundle.seed = freezeJson({ seq: custody.seed.seq, cells: custody.seed.cells });
+    bundle.checkpoint = freezeJson(custody.checkpoint);
+  }
+  return bundle;
 }

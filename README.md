@@ -5,7 +5,8 @@
 > receipt-chain ledger to rewind, snapshot, and boot saved states of cells,
 > groups of cells (organs), or entire quilts, as drop-ins that nest inside
 > another program or quilt. v0 = custody (snapshot/boot/nest); v1 = the rewind
-> family + write-side transactions (below).
+> family + write-side transactions (below); v2 = checkpoint signatures +
+> partial-custody replay seeds (`--from-checkpoint`, bottom).
 
 JEV is a hosted oracle that answers yes/no, multiple choice, and
 scored questions about content. It's deterministic (variance < 0.01
@@ -94,7 +95,8 @@ Boot throws `OrganBootError` (never partially boots) on: `SCHEMA_DRIFT`,
 `DUPLICATE_NEST`; the double-entry audit reports `DOUBLE_ENTRY_UNBALANCED /
 _HASH_MISMATCH / _STATE_MISMATCH` and never auto-repairs.
 
-Proofs: `test/organ.test.mjs` (23/23 v0; 34/34 with the v1 section below) — including a self-consistent *forged*
+Proofs: `test/organ.test.mjs` (23/23 v0; 34/34 with the v1 section; 44/44 with
+the v2 section below) — including a self-consistent *forged*
 chain (re-hashed by an attacker) that only replay can catch, and a forged host
 credit caught by double-entry. Evidence receipt: `examples/receipts/boot-demo-receipt.json`.
 
@@ -196,6 +198,57 @@ Cross-feed: both v1 states (tip + rewound) are on the live fleet organ store —
 `examples/receipts/rewind-v1-upload-receipt.json` (uploaded through the
 receipted `quilt.organ.v1` dialect adapter; native-dialect refusal receipted as
 the DIALECT_DRIFT finding, unification parked to lane 64-c).
+
+---
+
+## ORGAN BOOT v2 — checkpoint signatures + partial custody (`--from-checkpoint`)
+
+v2 adds the scale path: mint a SIGNED checkpoint once (pay the genesis replay
+once), then boot bundles that carry only the post-checkpoint receipts plus a
+replay seed. The custody gap becomes **conditional** — legal exactly when an
+HMAC-SHA256 signature under the verifier's key covers the boundary; unsigned
+gaps still fail closed (`CUSTODY_GAP`, unchanged). Doctrine:
+`docs/REVERSE-ACTUALIZED-SPEC.md` §8.
+
+```bash
+# 0. the proof suite (44 tests: 34 v0/v1 + 10 v2)
+npm test                                    # node --test test/organ.test.mjs
+
+# 1. MINT — verify the snapshot, replay the prefix ONCE, sign (manifestHash, chainTip, seq)
+node -e '
+Promise.all([import("./src/organ/checkpoint.mjs"), import("./src/organ/snapshot.mjs"), import("./examples/greeter-organ.mjs")])
+  .then(async ([{ signCheckpoint }, { snapshot }, { buildGreeterQuilt }]) => {
+    const q = buildGreeterQuilt();
+    const cp = signCheckpoint(snapshot(q.cells, q.ledger, { name: "greeter-organ" }), 7, "fleet-key");
+    console.log(cp.seq, cp.alg, cp.manifestHash.slice(0, 16)); // 7 HMAC-SHA256 <prefix manifestHash>
+  });'
+
+# 2. CARVE — the partial-custody bundle: receipts [checkpointSeq+1..tip] + seed + signed checkpoint
+#    carvePartialCustody(bundle, cp) → { manifest, state, receipts, seed, checkpoint }
+
+# 3. BOOT --from-checkpoint — verify signature → replay from the anchored seed → assert == state
+#    boot(partial, { checkpointKey: "fleet-key" })
+#    → organ.custody = { signedAt: {seq, hash, manifestHash, alg}, verifiedRange, seed }
+#    Fail-closed: CHECKPOINT_SIGNATURE_INVALID (forged/wrong key), CHECKPOINT_SEED_MISMATCH
+#    (seed tamper), CHECKPOINT_ANCHOR_MISMATCH (swapped prefix manifest),
+#    CHECKPOINT_SEQ_BEYOND_RECEIPTS, CHECKPOINT_SIGNATURE_REQUIRED (no key),
+#    CUSTODY_GAP (unsigned gap — unchanged v0 law)
+
+# 4. REWIND --from-checkpoint — down to the custody boundary only, hash-equal to
+#    the full bundle's answers; below the boundary is unowned history:
+#    rewind(organ, seq < boundary) → REWIND_PAST_CUSTODY (names the checkpoint)
+
+# 5. CONTINUE + RE-SNAPSHOT — append/transact extend the same chain and carry the
+#    anchor forward; snapshotOrgan(organ) boots again under the same key
+```
+
+Scale property: booting a 10-million-receipt organ costs O(tail), not
+O(history) — genesis is replayed once at checkpoint time, never at boot. The
+signature anchors the seed through two content-address hops
+(`sig → manifestHash → prefix manifest → seed state`); the only trust input is
+the key. Honest scope (§8.3): the anchor vouches for the prefix;
+post-checkpoint custody is the v0 law (hash chain + replay == state). Ed25519
+(asymmetric "who vouches") is the v3 path.
 
 ---
 

@@ -15,7 +15,7 @@
 
 import { makeReceipt, verifyChain } from "./manifest.mjs";
 import { applyOp as applyForNest } from "./toyQuilt.mjs";
-import { cellsStateHash } from "./snapshot.mjs";
+import { cellsStateHash, freezeJson } from "./snapshot.mjs";
 
 export class NestError extends Error {
   constructor(code, detail) {
@@ -110,8 +110,12 @@ export function verifyDoubleEntry(host, organ) {
   const debits = organ.ledger.filter((r) => r.seq > nestSeq);
 
   // Replay the organ ledger once, capturing the state hash after each receipt.
+  // v2: a partial-custody organ replays FROM ITS ANCHORED SEED — the carried
+  // ledger starts at the checkpoint boundary, not at genesis.
   const stateAtSeq = new Map();
-  const replayed = {};
+  const replayed = organ.custody?.kind === "signed-checkpoint" && organ.custody?.seed?.cells
+    ? freezeJson(organ.custody.seed.cells)
+    : {};
   for (const r of organ.ledger) {
     try {
       // Re-apply through the deterministic evaluator (toyQuilt.applyOp) —

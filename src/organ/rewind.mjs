@@ -1,4 +1,4 @@
-// quilt-jev-toolkit — organ rewind family + write-side transactions (v1, lane 64-a)
+// quilt-jev-toolkit — organ rewind family + write-side transactions (v1 lane 64-a, v2 lane 65-b)
 //
 // Spec (docs/REVERSE-ACTUALIZED-SPEC.md §7): the rewind family is the QUESTION's
 // first verb. v1 adds:
@@ -22,6 +22,13 @@
 // Fail-closed law (v0 carried forward): the subject is fully re-verified before
 // any rewind/transact view is produced — a forged chain is caught by
 // REPLAY_DIVERGENCE whether you boot it, rewind it, or write to it.
+//
+// v2 partial custody: a subject booted from a SIGNED checkpoint (bundle.seed /
+// organ.custody) replays prefixes FROM THE SEED, not from empty cells — the
+// checkpoint boundary is the custody floor. Rewinding below the floor is
+// impossible without the full chain and refuses with REWIND_PAST_CUSTODY,
+// naming the checkpoint; rewind/stateAt above it are byte-equal to the full
+// bundle's answers (the seed is signature-anchored, proven at boot).
 //
 // Append-only discipline (never delete data): the host ledger is never
 // rewritten. A rewind does not erase the superseded host credits — it appends
@@ -70,6 +77,27 @@ function isBundle(subject) {
   );
 }
 
+/** Resolve the replay base for a subject: empty cells (v0 full custody) or the
+ *  signature-anchored seed (v2 partial custody). For an organ, also re-asserts
+ *  the seed's in-memory integrity against its boot-verified hash. */
+function replayBaseOf(subject) {
+  const custody = subject.custody;
+  if (!custody || custody.kind !== "signed-checkpoint") return { base: {}, anchoredAt: null };
+  if (!custody.seed || !custody.seed.cells) {
+    fail("REPLAY_DIVERGENCE", "partial-custody subject carries no replay seed — the custody floor is unrecoverable");
+  }
+  let seedHash;
+  try {
+    seedHash = cellsStateHash(custody.seed.cells);
+  } catch (e) {
+    fail("REPLAY_DIVERGENCE", `custody seed not canonicalizable: ${e.message}`);
+  }
+  if (seedHash !== custody.seed.stateHash) {
+    fail("REPLAY_DIVERGENCE", `custody seed hash ${seedHash} != boot-verified ${custody.seed.stateHash} — the seed was tampered after boot`);
+  }
+  return { base: freezeJson(custody.seed.cells), anchoredAt: custody.signedAt.seq };
+}
+
 /** Resolve { receipts, genesisSeq, tipSeq, verify } for either subject kind.
  *  Bundle subjects are verified through the full boot courtroom (fail-closed:
   * REPLAY_DIVERGENCE fires for forged chains even on a pure query). Organ
@@ -82,7 +110,8 @@ function courtroom(subject, opts = {}) {
     const first = receipts[0];
     const cv = verifyChain(receipts, { expectedStart: first.seq, expectedPrev: first.prev });
     if (!cv.ok) fail(cv.code, `organ ledger fails its own chain verify: ${cv.detail}`);
-    const replayed = {};
+    const { base, anchoredAt } = replayBaseOf(subject);
+    const replayed = freezeJson(base); // the courtroom's own copy — base stays the pristine replay floor
     for (const r of receipts) {
       try {
         applyOp(replayed, r.op);
@@ -95,7 +124,7 @@ function courtroom(subject, opts = {}) {
     if (replayHash !== carriedHash) {
       fail("REPLAY_DIVERGENCE", `organ cells ${carriedHash} != replay of its own ledger ${replayHash}`);
     }
-    return { kind: "organ", organ: subject, receipts, genesisSeq: first.seq, tipSeq: receipts[receipts.length - 1].seq };
+    return { kind: "organ", organ: subject, receipts, genesisSeq: first.seq, tipSeq: receipts[receipts.length - 1].seq, base, anchoredAt };
   }
   if (isBundle(subject)) {
     const verdict = verifyBundle(subject, opts);
@@ -103,12 +132,15 @@ function courtroom(subject, opts = {}) {
       const first = verdict.errors[0];
       fail(first.code, `bundle fails verification before the operation may run: ${verdict.errors.map((e) => `[${e.code}] ${e.detail}`).join(" | ")}`);
     }
+    const base = subject.seed ? freezeJson(subject.seed.cells) : {};
     return {
       kind: "bundle",
       bundle: subject,
       receipts: subject.receipts,
       genesisSeq: subject.manifest.genesis.seq,
       tipSeq: subject.manifest.receiptRange.end,
+      base,
+      anchoredAt: verdict.custody ? verdict.custody.anchoredAt : null,
     };
   }
   fail("REWIND_TARGET_INVALID", "subject is neither a bundle {manifest, state, receipts} nor a booted organ");
@@ -121,6 +153,9 @@ function resolveTarget(court, toSeq) {
     fail("REWIND_TARGET_INVALID", `toSeq must be an integer, got ${JSON.stringify(toSeq)}`);
   }
   if (toSeq < court.genesisSeq) {
+    if (court.anchoredAt != null) {
+      fail("REWIND_PAST_CUSTODY", `toSeq ${toSeq} is before the carried range start ${court.genesisSeq} — pre-checkpoint history is not carried (custody anchored by a signed checkpoint at seq ${court.anchoredAt}); without the full chain, rewind below the custody boundary is impossible`);
+    }
     fail("REWIND_PAST_CUSTODY", `toSeq ${toSeq} is before the carried range start ${court.genesisSeq} — a prefix the bundle does not carry is unowned history (checkpoint custody starts at genesis.seq)`);
   }
   if (toSeq > court.tipSeq) {
@@ -129,9 +164,11 @@ function resolveTarget(court, toSeq) {
   return toSeq - court.genesisSeq;
 }
 
-/** Pure prefix replay: state AS OF receipt `seq` (inclusive). */
-function prefixState(receipts, toIdx) {
-  const cells = {};
+/** Pure prefix replay: state AS OF receipt `seq` (inclusive). Starts from
+ *  `base` — empty cells under full custody, the anchored seed under partial
+ *  custody (v2). */
+function prefixState(receipts, toIdx, base = {}) {
+  const cells = freezeJson(base);
   for (let i = 0; i <= toIdx; i++) {
     applyOp(cells, receipts[i].op); // courtroom already proved these apply cleanly
   }
@@ -145,6 +182,7 @@ function provenanceOf(court, toSeq, tipHash) {
     count: toSeq - court.genesisSeq + 1,
     tipHash,
     carriedRange: { start: court.genesisSeq, end: court.tipSeq, count: court.tipSeq - court.genesisSeq + 1 },
+    anchoredAt: court.anchoredAt ?? null, // v2: the signed checkpoint boundary, null under full custody
   };
 }
 
@@ -157,7 +195,7 @@ function provenanceOf(court, toSeq, tipHash) {
 export function stateAt(subject, seq, opts = {}) {
   const court = courtroom(subject, opts);
   const toIdx = resolveTarget(court, seq);
-  const cells = prefixState(court.receipts, toIdx);
+  const cells = prefixState(court.receipts, toIdx, court.base);
   return {
     seq,
     state: { cells },
@@ -188,7 +226,7 @@ export function rewind(subject, toSeq, opts = {}) {
   const toIdx = resolveTarget(court, toSeq);
 
   if (court.kind === "bundle") {
-    const cells = prefixState(court.receipts, toIdx);
+    const cells = prefixState(court.receipts, toIdx, court.base);
     return {
       state: { cells },
       stateHash: cellsStateHash(cells),
@@ -199,7 +237,7 @@ export function rewind(subject, toSeq, opts = {}) {
   // -- organ form: destructive rewind with compensating host receipt --------
   const organ = court.organ;
   const rewoundFrom = court.tipSeq;
-  const prefixCells = prefixState(court.receipts, toIdx);
+  const prefixCells = prefixState(court.receipts, toIdx, court.base);
   const prefixHash = cellsStateHash(prefixCells);
 
   // Compute the compensating evidence BEFORE truncating (the host credits for
@@ -340,6 +378,12 @@ export function transact(bundle, ops, opts = {}) {
     edges: base.manifest.edges,
     supersedes: base.manifest.manifestHash,
   });
+  // v2 partial custody: the anchor and the seed ride forward — the successor
+  // bundle stays bootable under the same checkpoint key.
+  if (base.seed && base.checkpoint) {
+    successor.seed = freezeJson(base.seed);
+    successor.checkpoint = freezeJson(base.checkpoint);
+  }
   const selfCheck = verifyBundle(successor, opts);
   if (!selfCheck.ok) {
     fail("REPLAY_DIVERGENCE", `transact produced a bundle that fails its own boot courtroom: ${selfCheck.errors.map((e) => `[${e.code}] ${e.detail}`).join(" | ")}`);

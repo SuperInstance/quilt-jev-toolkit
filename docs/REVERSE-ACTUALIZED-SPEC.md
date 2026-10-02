@@ -257,13 +257,16 @@ double-entry auditing.
 
 **Parked (receipted, in demand order):**
 
-- **Checkpoint signatures / PKI** — `trustedCheckpoint` is still an unpinned
-  `{seq, hash}` pair; signatures (who vouches for the anchor) are unimplemented.
+- **Checkpoint signatures / PKI** — ~~`trustedCheckpoint` is still an unpinned
+  `{seq, hash}` pair; signatures (who vouches for the anchor) are
+  unimplemented~~ **DELIVERED in v2 (§8)** — HMAC-SHA256 over
+  `(manifestHash, chainTip, seq)`; asymmetric PKI remains parked (§8.5).
 - **Organ split / merge** — one organ id splitting into two chains (or two
   merging); the rewind primitive is the substrate, the identity law is open.
-- **Partial-custody replay seeds** — replay still starts from empty cells
+- **Partial-custody replay seeds** — ~~replay still starts from empty cells
   (v0 law); a carried mid-chain seed state (replay from a verified snapshot at
-  seq k) is parked.
+  seq k) is parked~~ **DELIVERED in v2 (§8)** — the seed is legal exactly when
+  a signed checkpoint anchors it.
 - **Canonical binary encoding** — receipts/state are canonical JSON; a binary
   framing for large organs is parked.
 - **Organ-granularity transactions** — `transact()` writes bundles; a nested
@@ -275,3 +278,139 @@ double-entry auditing.
   layouts; the upload adapter + DIALECT_DRIFT finding are receipted in
   `examples/receipts/rewind-v1-upload-receipt.json`); unification is lane 64-c's.
 
+
+---
+
+## 8. v2 — checkpoint signatures + partial-custody replay seeds (lane 65-b)
+
+§7.4's top parked item, derived backward into two implemented properties. The
+far-ahead image needs a scale path: an organ with millions of receipts must
+boot **without replaying genesis** — and the custody gap that v0 refused must
+become legal under exactly one condition.
+
+### 8.1 The signed checkpoint (`src/organ/checkpoint.mjs` + boot.mjs)
+
+Minting (`signCheckpoint(bundle, seq, key)`) replays the prefix ONCE, at
+checkpoint time, snapshots it, and signs the triple with HMAC-SHA256 under the
+minter's key (Ed25519 is the v3 path; unknown algorithms refuse):
+
+```
+{ schema: "quilt.organ.checkpoint", schemaVersion: 1, alg: "HMAC-SHA256",
+  seq: <boundary — last receipt covered>,
+  hash: <receipt seq's hash = chainTip at the boundary>,
+  manifestHash: <the prefix snapshot's manifestHash>,
+  sig: <HMAC-SHA256(key, canonical({hash, manifestHash, seq}))>,
+  manifest: <the prefix snapshot's manifest — unsigned, but content-addressed
+             to the signed manifestHash> }
+```
+
+The signature anchors the replay SEED (the state at `seq`) through two
+content-address hops: `sig → manifestHash → prefix manifest → seed state
+hash`. The only trust input is the key; everything else is re-derived.
+
+Carving (`carvePartialCustody(bundle, checkpoint)`) is keyless and mechanical:
+it re-derives the prefix manifest from the verified full bundle, refuses a
+checkpoint that does not describe this bundle's prefix exactly
+(`CHECKPOINT_ANCHOR_MISMATCH`), and produces the partial bundle — receipts
+`[seq+1..tip]` only, plus `seed: {seq, cells}` and the signed checkpoint.
+
+### 8.2 Partial custody boot — the gap becomes CONDITIONAL
+
+`boot(partial, { checkpointKey })` runs the v0 courtroom with one new branch
+(§4's step 4): the bundle carries a replay seed ⇒ the prefix is not carried ⇒
+the gap is legal **only if** a valid signature covers the boundary. The seed
+replaces genesis as the replay floor: `replay(seed, receipts[seq+1..tip]) ==
+manifest.state.cellsSha256` or no boot. The organ wakes carrying its custody
+provenance:
+
+```
+organ.custody = { kind: "signed-checkpoint",
+                  signedAt: {seq, hash, manifestHash, alg},
+                  verifiedRange: {start, end},       // what replay actually verified
+                  seed: {seq, cells, stateHash} }    // the replay floor, retained
+```
+
+`stateAt` / `rewind` become seed-aware on both subject kinds: prefix queries
+answer **hash-equal to the full bundle's answers** above the floor; below the
+floor — even to the checkpoint seq itself — is unowned history
+(`REWIND_PAST_CUSTODY`, naming the checkpoint boundary). `transact` and
+`snapshotOrgan` carry the seed + anchor forward, so a partial-custody lineage
+stays bootable under the same key. Double-entry auditing replays
+seed-aware too.
+
+### 8.3 New fail-closed codes (v2, all proven in the test suite)
+
+| Code | Failure mode | Fail-closed rule |
+|------|--------------|------------------|
+| `CHECKPOINT_SIGNATURE_REQUIRED` | seed present, no usable key (or no usable signed checkpoint to verify) | refuse boot — the gap boundary must be signature-covered |
+| `CHECKPOINT_MALFORMED` | checkpoint doc fails structure (wrong schema/alg/version, missing fields, bad hex, bare unsigned `{seq,hash}` pair) | refuse boot — Ed25519 and anything else unknown is a v3 refusal, not a fallback |
+| `CHECKPOINT_SIGNATURE_INVALID` | HMAC does not verify: forged sig, tampered signed fields, wrong key | refuse boot |
+| `CHECKPOINT_SEQ_BEYOND_RECEIPTS` | checkpoint anchors a seq beyond the carried receipts | refuse boot — no post-checkpoint receipt exists to verify against it |
+| `CUSTODY_CHECKPOINT_MISMATCH` | (v0 code, now also v2) genuine checkpoint, wrong chain/boundary | refuse boot |
+| `CHECKPOINT_ANCHOR_MISMATCH` | the carried prefix manifest does not re-hash to the SIGNED manifestHash (swapped/tampered anchor; carve refuses the same way) | refuse boot |
+| `CHECKPOINT_SEED_MISMATCH` | carried seed's state ≠ the signature-anchored prefix state (seed tamper) | refuse boot |
+| `CHECKPOINT_SEQ_OUT_OF_RANGE` / `CHECKPOINT_MINT_INVALID` | mint/carve-side: boundary outside the range, carving at the tip (no tail would remain), minting from a partial-custody source | refuse the operation |
+
+Unsigned gaps stay fail-closed exactly as in v0/v1: seed with no checkpoint at
+all → `CUSTODY_GAP`; a full-custody bundle that stuffs a seed in →
+`MANIFEST_INVALID` (contradictory custody claim).
+
+**Honest scope of the anchor:** the signature vouches for the PREFIX — the
+state at `seq`, the boundary receipt hash, the organ identity. Post-checkpoint
+custody remains the v0 law (hash-linked receipts + replay == carried state);
+a fully re-hashed post-checkpoint history is a different fork, not a detectable
+forgery, exactly as a fully re-hashed genesis-to-tip bundle was in v0. A later
+checkpoint tightens the window further.
+
+### 8.4 v2 acceptance (proven by `node --test test/organ.test.mjs`, 44/44)
+
+1. Signed checkpoint round-trip: sign → verify → carve → partial boot ==
+   full boot byte-for-byte; provenance `{signedAt, verifiedRange}` carried;
+   the ledger continues the same hash chain from the carried tip.
+2. Structural no-genesis-replay proof: the first carried receipt cannot apply
+   to empty cells, yet every `stateAt`/`rewind` answer is hash-equal to the
+   full bundle's.
+3. Unsigned gap still rejected (`CUSTODY_GAP`, `CHECKPOINT_MALFORMED` for a
+   bare pair, `CHECKPOINT_SIGNATURE_REQUIRED` without a key).
+4. Forgery: flipped sig / tampered signed fields / wrong key →
+   `CHECKPOINT_SIGNATURE_INVALID` (and carve independently refuses the
+   boundary tamper).
+5. Post-checkpoint tamper: receipt tamper → `RECEIPT_HASH_MISMATCH`; seed
+   tamper → `CHECKPOINT_SEED_MISMATCH`; swapped anchor →
+   `CHECKPOINT_ANCHOR_MISMATCH`; self-consistent tail forgery with a stale
+   claim → `REPLAY_DIVERGENCE`.
+6. Degenerate checkpoint-at-tip: legal to mint and verify; the full bundle
+   boots with it; carving at the tip refuses (`CHECKPOINT_SEQ_OUT_OF_RANGE`).
+7. Rewind from partial custody works down to the custody boundary only;
+   below it refuses with `REWIND_PAST_CUSTODY` naming the checkpoint; a
+   rewound partial-custody organ re-snapshots and boots under the same key.
+8. `transact` and nesting (`verifyDoubleEntry`) are seed-aware; atomicity
+   unchanged.
+
+### 8.5 Now-covered vs parked
+
+**Now-covered (v2):** checkpoint signatures (HMAC-SHA256 over
+`(manifestHash, chainTip, seq)`, key provided at checkpoint time), boot from a
+trusted checkpoint without the genesis chain, partial-custody replay seeds
+(the v0 empty-cells replay law is now conditional on signed custody),
+seed-aware time-travel/rewind/transactions/double-entry, and custody
+provenance carried on the booted organ.
+
+**Parked (in demand order):**
+
+- **Ed25519 / real PKI** — HMAC is symmetric: verifier and minter share the
+  key. Asymmetric signatures (who vouches) + key rotation + multi-checkpoint
+  chains are the v3 path; `CHECKPOINT_MALFORMED` already refuses unknown algs
+  so the format can grow without drift.
+- **Organ split / merge** — one organ id splitting into two chains (or two
+  merging); the rewind primitive is the substrate, the identity law is open.
+- **Canonical binary encoding** — receipts/state are canonical JSON; a binary
+  framing for large organs is parked.
+- **Organ-granularity transactions** — `transact()` writes bundles; a nested
+  organ's host-coupled transaction (debit+credit+rewind as one atomic host
+  write) is parked.
+- **Concurrent multi-organ hosts** — single-writer assumption unchanged from
+  v0.
+- **Dialect unification** — the fleet's organ store speaks `quilt.organ.v1`,
+  the toolkit `quilt.organ.manifest/v1`; unification is lane 64-c's (see
+  §7.4).

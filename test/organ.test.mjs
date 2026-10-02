@@ -18,9 +18,10 @@ import {
 } from "../src/organ/manifest.mjs";
 import { makeQuilt, quiltApply, applyOp, verifyQuiltLedger } from "../src/organ/toyQuilt.mjs";
 import { snapshot, snapshotOrgan, cellsStateHash, cellStateHash } from "../src/organ/snapshot.mjs";
-import { boot, OrganBootError, verifyBundle } from "../src/organ/boot.mjs";
+import { boot, OrganBootError, verifyBundle, verifySignedCheckpoint } from "../src/organ/boot.mjs";
 import { nestInto, verifyDoubleEntry } from "../src/organ/nest.mjs";
 import { stateAt, rewind, transact, ORGAN_REWIND_TYPE } from "../src/organ/rewind.mjs";
+import { signCheckpoint, carvePartialCustody } from "../src/organ/checkpoint.mjs";
 import { buildGreeterQuilt, GREETER_FINAL_OUT, GREETER_RECEIPTS, GREETER_EDGES } from "../examples/greeter-organ.mjs";
 
 const GREETER_CELLS = ["greeting", "subject", "template", "out"];
@@ -773,4 +774,270 @@ test("v1 replay divergence: self-consistent forged chains refuse stateAt, rewind
   const rogue = { ...organ, cells: JSON.parse(JSON.stringify(organ.cells)) };
   rogue.cells.subject.value = "tampered-in-memory";
   assert.equal(v1ErrorCode(() => rewind(rogue, 3)), "REPLAY_DIVERGENCE");
+});
+
+// ===========================================================================
+// v2 (lane 65-b) — checkpoint signatures + partial-custody replay seeds
+// ===========================================================================
+//
+// The scale law (docs/REVERSE-ACTUALIZED-SPEC.md §8): a checkpoint signs a
+// snapshot's (manifestHash, chainTip, seq) with HMAC-SHA256 under a key
+// provided at checkpoint time. The custody GAP becomes CONDITIONAL: a bundle
+// carrying only receipts [checkpointSeq+1..tip] + a replay seed boots IF (and
+// only if) a valid signature covers the gap boundary. Unsigned gap = fail-
+// closed, unchanged. Minting pays the genesis replay ONCE; boot replays only
+// the post-checkpoint receipts.
+
+const CP_KEY = "fleet-checkpoint-key-65b";
+const CP_OTHER_KEY = "not-the-fleet-key";
+
+// Full 16-receipt bundle [0..15]; boundary at seq 7 (mid-chain: the seed is
+// "Greetings, Fleet!", the carried tail [8..15] starts with a `render` that
+// CANNOT replay from empty cells — structural proof genesis is never replayed).
+const CP_SEQ = 7;
+const full16 = () => advancedBundle(ADVANCE_OPS);
+const signedPartial = (bundle = full16(), key = CP_KEY) => {
+  const cp = signCheckpoint(bundle, CP_SEQ, key);
+  return { full: bundle, bundle, checkpoint: cp, partial: carvePartialCustody(bundle, cp) };
+};
+const barePartial = (partial) => ({
+  manifest: partial.manifest,
+  state: partial.state,
+  receipts: partial.receipts,
+  seed: partial.seed, // seed but NO checkpoint — the unsigned gap
+});
+
+test("v2 signed checkpoint round-trip: sign → verify → carve → partial boot == full boot", () => {
+  const full = full16();
+  const cp = signCheckpoint(full, CP_SEQ, CP_KEY);
+  assert.equal(cp.schema, "quilt.organ.checkpoint");
+  assert.equal(cp.alg, "HMAC-SHA256");
+  assert.equal(cp.seq, CP_SEQ);
+  assert.equal(cp.hash, full.receipts[CP_SEQ].hash, "chainTip is the boundary receipt's hash");
+  assert.equal(verifySignedCheckpoint(cp, CP_KEY).ok, true);
+  assert.equal(cp.manifest.receiptRange.end, CP_SEQ, "the anchor manifest is the prefix snapshot [0..seq]");
+  assert.equal(cp.manifestHash, cp.manifest.manifestHash);
+
+  const partial = carvePartialCustody(full, cp);
+  assert.equal(partial.receipts.length, full.receipts.length - (CP_SEQ + 1));
+  assert.equal(partial.receipts[0].seq, CP_SEQ + 1);
+  assert.equal(partial.manifest.receiptRange.start, CP_SEQ + 1);
+  assert.equal(partial.manifest.genesis.seq, CP_SEQ + 1);
+  assert.equal(partial.manifest.genesis.prevHash, cp.hash, "the manifest pins the signed chainTip as its parent");
+  assert.equal(partial.manifest.state.cellsSha256, full.manifest.state.cellsSha256, "same tip claim");
+  assert.equal(partial.manifest.supersedes, full.manifest.manifestHash, "honest lineage");
+  assert.equal(partial.seed.seq, CP_SEQ);
+  assert.equal(cellsStateHash(partial.seed.cells), cp.manifest.state.cellsSha256, "seed == prefix snapshot state");
+
+  // Boot WITHOUT the genesis chain: state proven by replay from the anchored seed.
+  const organ = boot(partial, { checkpointKey: CP_KEY });
+  assert.equal(organ.cells.out.value, "Salutations, v1!");
+  assert.equal(cellsStateHash(organ.cells), full.manifest.state.cellsSha256);
+  const fullOrgan = boot(full);
+  assert.equal(canonicalJson(organ.cells), canonicalJson(fullOrgan.cells), "partial boot == full boot, byte-for-byte");
+
+  // Custody provenance: signedAt + verifiedRange (§8 law).
+  assert.equal(organ.custody.kind, "signed-checkpoint");
+  assert.deepEqual(organ.custody.signedAt, { seq: CP_SEQ, hash: cp.hash, manifestHash: cp.manifestHash, alg: "HMAC-SHA256" });
+  assert.deepEqual(organ.custody.verifiedRange, { start: CP_SEQ + 1, end: full.manifest.receiptRange.end });
+
+  // The ledger continues the SAME hash chain from the carried tip.
+  assert.equal(organ.ledger.length, partial.receipts.length);
+  const { debit, credit } = organ.append({ type: "set", cellId: "subject", value: "post-checkpoint" });
+  assert.equal(debit.seq, full.manifest.receiptRange.end + 1);
+  assert.equal(debit.prev, full.receipts[full.receipts.length - 1].hash);
+  assert.equal(credit, null);
+});
+
+test("v2 partial custody never replays genesis: the carried tail is structurally unreplayable from empty", () => {
+  const { full, partial } = signedPartial();
+  // seq 8 is a `render` needing cells init'd pre-checkpoint: replaying the
+  // carried range from EMPTY cells is impossible — boot cannot be cheating.
+  assert.throws(() => applyOp({}, partial.receipts[0].op));
+  // Every prefix query answers hash-equal to the FULL bundle's answer.
+  const organ = boot(partial, { checkpointKey: CP_KEY });
+  for (const seq of [CP_SEQ + 1, 10, 13, full.manifest.receiptRange.end]) {
+    assert.equal(stateAt(organ, seq).stateHash, stateAt(full, seq).stateHash, `organ stateAt ${seq}`);
+    assert.equal(rewind(partial, seq, { checkpointKey: CP_KEY }).stateHash, stateAt(full, seq).stateHash, `bundle rewind ${seq}`);
+  }
+  assert.equal(stateAt(organ, 12).provenance.anchoredAt, CP_SEQ, "provenance names the anchor");
+  assert.equal(stateAt(full, 12).provenance.anchoredAt, null, "full custody has no anchor");
+});
+
+test("v2 unsigned gap still rejected: CUSTODY_GAP unchanged; a seed without a signature is CHECKPOINT_SIGNATURE_REQUIRED", () => {
+  const { partial } = signedPartial();
+  // 1. seed carried, no checkpoint at all → the v0 gap, unchanged
+  assert.equal(bootCode(barePartial(partial)), "CUSTODY_GAP");
+  // 2. seed carried, bare v0-style {seq, hash} pair (unsigned), even WITH a key:
+  //    it is not a signed-checkpoint document at all → CHECKPOINT_MALFORMED
+  //    (structure is checked before the signature; either way it never boots)
+  const cp = partial.checkpoint;
+  assert.equal(
+    bootCode(barePartial(partial), { trustedCheckpoint: { seq: cp.seq, hash: cp.hash }, checkpointKey: CP_KEY }),
+    "CHECKPOINT_MALFORMED",
+    "an unsigned checkpoint cannot legalize a seed-carrying gap",
+  );
+  // 3. signed checkpoint carried but no verification key
+  assert.equal(bootCode(partial), "CHECKPOINT_SIGNATURE_REQUIRED");
+  assert.equal(bootCode(partial, { checkpointKey: "" }), "CHECKPOINT_SIGNATURE_REQUIRED");
+  // 4. contradictory custody: a full bundle stuffing a seed in refuses outright
+  const full = full16();
+  assert.equal(bootCode({ ...full, seed: { seq: 5, cells: {} } }), "MANIFEST_INVALID");
+});
+
+test("v2 forged signature rejected: flipped sig, tampered signed fields, wrong key", () => {
+  const full = full16();
+  const cp = signCheckpoint(full, CP_SEQ, CP_KEY);
+  const { partial } = signedPartial(full);
+
+  const flip = (s) => (s.endsWith("0") ? s.slice(0, -1) + "1" : s.slice(0, -1) + "0");
+  const forgedSig = carvePartialCustody(full, { ...cp, sig: flip(cp.sig) });
+  assert.equal(bootCode(forgedSig, { checkpointKey: CP_KEY }), "CHECKPOINT_SIGNATURE_INVALID");
+
+  // seq is INSIDE the signed triple: tampering it breaks the signature (the
+  // signature layer catches what a keyless check cannot); note carve ALSO
+  // refuses it independently — the boundary tamper is caught at both layers.
+  const forgedSeqDoc = { ...cp, seq: CP_SEQ + 1, hash: full.receipts[CP_SEQ + 1].hash };
+  assert.equal(verifySignedCheckpoint(forgedSeqDoc, CP_KEY).code, "CHECKPOINT_SIGNATURE_INVALID");
+  assert.throws(() => carvePartialCustody(full, forgedSeqDoc), (e) => e.code === "CHECKPOINT_ANCHOR_MISMATCH");
+
+  assert.equal(verifySignedCheckpoint(cp, CP_OTHER_KEY).code, "CHECKPOINT_SIGNATURE_INVALID", "a different key is a different trust root");
+  assert.equal(bootCode(partial, { checkpointKey: CP_OTHER_KEY }), "CHECKPOINT_SIGNATURE_INVALID");
+});
+
+test("v2 post-checkpoint tamper caught: receipts, seed, and anchor each fail with their own code", () => {
+  const full = full16();
+  const cp = signCheckpoint(full, CP_SEQ, CP_KEY);
+
+  // (a) naive receipt tamper in the carried tail → the chain catches it
+  const t1 = carvePartialCustody(full, cp);
+  t1.receipts[2].op.value = "FORGED";
+  assert.equal(bootCode(t1, { checkpointKey: CP_KEY }), "RECEIPT_HASH_MISMATCH");
+
+  // (b) seed tamper → the signature-anchored prefix state catches it
+  const t2 = carvePartialCustody(full, cp);
+  t2.seed.cells.greeting.value = "evil";
+  assert.equal(bootCode(t2, { checkpointKey: CP_KEY }), "CHECKPOINT_SEED_MISMATCH");
+
+  // (c) swapped anchor manifest → it does not re-hash to the SIGNED manifestHash
+  //     (the manifest rides unsigned, but it is content-addressed to the sig)
+  const t3 = carvePartialCustody(full, cp);
+  t3.checkpoint.manifest = full.manifest; // the TIP manifest, not the prefix manifest
+  assert.equal(bootCode(t3, { checkpointKey: CP_KEY }), "CHECKPOINT_ANCHOR_MISMATCH");
+
+  // (d) self-consistent tail forgery (re-hashed) with a stale state claim →
+  //     replay from the anchored seed catches it (the v0 law, seed-aware).
+  //     Carried index 4 is seq 12 — the LAST greeting `set`, so the forgery
+  //     survives to the tip render and changes the replayed state.
+  const t4 = carvePartialCustody(full, cp);
+  t4.receipts[4].op.value = "FLEET";
+  for (let i = 4; i < t4.receipts.length; i++) {
+    if (i > 4) t4.receipts[i].prev = t4.receipts[i - 1].hash;
+    t4.receipts[i].hash = receiptHash(t4.receipts[i]);
+  }
+  t4.manifest.manifestHash = computeManifestHash(t4.manifest);
+  assert.equal(bootCode(t4, { checkpointKey: CP_KEY }), "REPLAY_DIVERGENCE");
+});
+
+test("v2 checkpoint seq beyond available receipts + unknown algorithm refuse with named codes", () => {
+  const { partial, checkpoint: cp } = signedPartial();
+  const bare = barePartial(partial);
+
+  // A GENUINE checkpoint from a longer chain (same key) anchors seq 17 —
+  // beyond this bundle's last carried receipt (15). Nothing to verify against.
+  const longer = advancedBundle([
+    ...ADVANCE_OPS,
+    { type: "set", cellId: "subject", value: "longer" },
+    { type: "render", cellId: "out", templateId: "template", from: ["greeting", "subject"] },
+  ]);
+  const cpLong = signCheckpoint(longer, longer.manifest.receiptRange.end, CP_KEY);
+  assert.equal(verifySignedCheckpoint(cpLong, CP_KEY).ok, true, "the far checkpoint is genuine");
+  assert.equal(bootCode(bare, { trustedCheckpoint: cpLong, checkpointKey: CP_KEY }), "CHECKPOINT_SEQ_BEYOND_RECEIPTS");
+
+  // Ed25519 is the v3 path: unknown algs refuse as CHECKPOINT_MALFORMED
+  assert.equal(bootCode(bare, { trustedCheckpoint: { ...cp, alg: "Ed25519" }, checkpointKey: CP_KEY }), "CHECKPOINT_MALFORMED");
+});
+
+test("v2 checkpoint-at-tip degenerate: legal to mint, verifies, boots the full bundle; carving at the tip refuses", () => {
+  const full = full16();
+  const tip = full.manifest.receiptRange.end;
+  const cpTip = signCheckpoint(full, tip, CP_KEY);
+  assert.equal(verifySignedCheckpoint(cpTip, CP_KEY).ok, true);
+  // The full bundle still boots with it (full custody needs no anchor; the
+  // at-tip checkpoint is the degenerate zero-coverage anchor).
+  const organ = boot(full, { trustedCheckpoint: cpTip, checkpointKey: CP_KEY });
+  assert.equal(organ.cells.out.value, "Salutations, v1!");
+  // Carving at the tip is refused: no post-checkpoint receipts would remain.
+  assert.throws(() => carvePartialCustody(full, cpTip), (e) => e.code === "CHECKPOINT_SEQ_OUT_OF_RANGE");
+});
+
+test("v2 rewind from partial custody: works down to the custody boundary; below it is unowned history", () => {
+  const { full, partial } = signedPartial();
+  const organ = boot(partial, { checkpointKey: CP_KEY });
+
+  // The FLOOR (first carried receipt) is reachable and matches the full bundle.
+  const atFloor = rewind(organ, CP_SEQ + 1);
+  assert.equal(atFloor.stateHash, stateAt(full, CP_SEQ + 1).stateHash);
+  assert.equal(organ.ledger.length, 1, "destructive rewind truncates to the boundary receipt");
+  const { debit } = organ.append({ type: "set", cellId: "subject", value: "from-the-floor" });
+  assert.equal(debit.seq, CP_SEQ + 2);
+  assert.equal(debit.prev, full.receipts[CP_SEQ + 1].hash, "appending continues the same chain");
+
+  // Below the floor — even to the checkpoint seq itself — is unowned history.
+  assert.equal(v1ErrorCode(() => rewind(organ, CP_SEQ)), "REWIND_PAST_CUSTODY");
+  assert.equal(v1ErrorCode(() => rewind(organ, 0)), "REWIND_PAST_CUSTODY");
+  assert.equal(v1ErrorCode(() => stateAt(organ, 3)), "REWIND_PAST_CUSTODY");
+  try {
+    rewind(organ, CP_SEQ);
+    assert.ok(false, "must have thrown");
+  } catch (e) {
+    assert.match(e.detail, /signed checkpoint at seq 7/, "the error NAMES the checkpoint boundary");
+  }
+
+  // A rewound partial-custody organ re-snapshots WITH its custody and boots
+  // under the same key, hash-equal to the full bundle's answer.
+  const organ2 = boot(partial, { checkpointKey: CP_KEY });
+  rewind(organ2, 10);
+  const b2 = snapshotOrgan(organ2);
+  assert.ok(b2.seed && b2.checkpoint, "custody rides forward on re-snapshot");
+  const booted2 = boot(b2, { checkpointKey: CP_KEY });
+  assert.equal(cellsStateHash(booted2.cells), stateAt(full, 10).stateHash);
+  assert.equal(booted2.custody.signedAt.seq, CP_SEQ, "the anchor survives the rewind + re-snapshot");
+});
+
+test("v2 transact on a partial-custody bundle: the anchor rides forward; atomicity unchanged; no key → no courtroom", () => {
+  const { partial } = signedPartial();
+  const before = canonicalJson(partial);
+
+  const tx = transact(partial, [{ type: "set", cellId: "subject", value: "tx-on-seed" }], { checkpointKey: CP_KEY });
+  assert.equal(tx.ok, true);
+  assert.ok(tx.bundle.seed && tx.bundle.checkpoint, "the successor carries the custody claim");
+  const organ = boot(tx.bundle, { checkpointKey: CP_KEY });
+  assert.equal(organ.cells.subject.value, "tx-on-seed");
+  assert.equal(organ.custody.signedAt.seq, CP_SEQ);
+
+  // Atomicity on the partial form: failure → input byte-untouched.
+  const txFail = transact(partial, [{ type: "set", cellId: "ghost", value: "boom" }], { checkpointKey: CP_KEY });
+  assert.equal(txFail.ok, false);
+  assert.equal(txFail.code, "OP_APPLY_FAILED");
+  assert.equal(canonicalJson(partial), before);
+
+  // The courtroom runs before the write: no key → CHECKPOINT_SIGNATURE_REQUIRED.
+  assert.equal(v1ErrorCode(() => transact(partial, [{ type: "set", cellId: "subject", value: "x" }])), "CHECKPOINT_SIGNATURE_REQUIRED");
+});
+
+test("v2 a partial-custody organ nests: double-entry audits over the seed-aware replay", () => {
+  const { partial } = signedPartial();
+  const host = makeQuilt("host-v2");
+  const organ = boot(partial, { checkpointKey: CP_KEY, host });
+  assert.ok(host.ledger.some((r) => r.op.type === "organ.nest"));
+  organ.append({ type: "set", cellId: "subject", value: "nested-v2" });
+  organ.append({ type: "render", cellId: "out", templateId: "template", from: ["greeting", "subject"] });
+  const de = verifyDoubleEntry(host, organ);
+  assert.equal(de.ok, true, JSON.stringify(de.errors));
+  assert.equal(de.creditsChecked, 2);
+  // re-snapshot from the nested organ still boots with custody intact
+  const b2 = snapshotOrgan(organ);
+  const organ2 = boot(b2, { checkpointKey: CP_KEY });
+  assert.equal(organ2.cells.out.value, "Salutations, nested-v2!");
 });
