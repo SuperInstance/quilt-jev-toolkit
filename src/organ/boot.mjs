@@ -122,6 +122,28 @@ function signerOf(cp) {
     : { kind: "hmac-sha256", anchoredAt: cp.seq };
 }
 
+/** §11 key revocation — the ENFORCEMENT half (wave-69; the statement layer is
+ *  designed in spec §11 and parked). opts.revokedKeys is the VERIFIER'S
+ *  revocation map {fingerprint → revocationSeq}: a named (Ed25519) era whose
+ *  checkpoint anchors a seq AFTER the key's revocation-seq is refused
+ *  E_KEY_REVOKED. The era stays valid up to AND INCLUDING the revocation-seq
+ *  (the organ has no wall clock — seq is the only ordering, so revocation is
+ *  never retroactive beyond the declared closure). HMAC eras carry no
+ *  fingerprint: a shared secret has no identity to revoke — rotate instead.
+ *  Returns null when the era is clear. */
+function revocationVerdict(cp, revokedKeys, eraLabel) {
+  if (!revokedKeys) return null;
+  const fp = signerOf(cp).publicKeyFingerprint;
+  if (fp === undefined) return null;
+  if (Object.prototype.hasOwnProperty.call(revokedKeys, fp) && cp.seq > revokedKeys[fp]) {
+    return {
+      code: "E_KEY_REVOKED",
+      detail: `${eraLabel}checkpoint anchors seq ${cp.seq} under key ${fp.slice(0, 12)}… whose era closed at revocation-seq ${revokedKeys[fp]} — a revoked key signs nothing after its closure (spec §11)`,
+    };
+  }
+  return null;
+}
+
 /** Verify a SIGNED checkpoint document's structure and signature (no bundle
  *  needed). Returns { ok } or { ok:false, code, detail } with codes
  *  CHECKPOINT_MALFORMED / CHECKPOINT_SIGNATURE_REQUIRED /
@@ -273,6 +295,23 @@ export function verifyBundle(bundle, opts = {}) {
   out.tipHash = cv.tipHash;
 
   // -- 4. custody anchor ----------------------------------------------------
+  // §11 revocation map (verifier-side trust statement; fail-closed on a
+  // malformed one — a broken revocation list is refused, never partially
+  // trusted). Applies wherever signatures are actually verified below; an
+  // opts.trustedCheckpoint path verifies no signature, so it has no bite there.
+  const revokedKeys = opts.revokedKeys ?? null;
+  if (revokedKeys !== null) {
+    if (typeof revokedKeys !== "object" || Array.isArray(revokedKeys)) {
+      fail("CHECKPOINT_MALFORMED", "opts.revokedKeys must be an object {fingerprint → revocationSeq} (spec §11)");
+      return out;
+    }
+    for (const [fp, rseq] of Object.entries(revokedKeys)) {
+      if (!HEX64.test(fp) || !Number.isInteger(rseq) || rseq < 0) {
+        fail("CHECKPOINT_MALFORMED", `opts.revokedKeys[${JSON.stringify(fp.slice(0, 24))}] must map a 64-hex key fingerprint to a non-negative revocation seq (spec §11)`);
+        return out;
+      }
+    }
+  }
   // v2: bundle.seed present ⇒ PARTIAL CUSTODY — the prefix [0..cp.seq] is not
   // carried; the gap is legal only under a signature covering the boundary.
   const partialSeed = bundle.seed ?? null;
@@ -337,6 +376,11 @@ export function verifyBundle(bundle, opts = {}) {
       fail(sig0.code, sig0.detail);
       return out;
     }
+    const rev0 = revocationVerdict(c0, revokedKeys, "era 0: ");
+    if (rev0) {
+      fail(rev0.code, rev0.detail);
+      return out;
+    }
     if (c0.seq > manifest.receiptRange.end) {
       fail("CHECKPOINT_SEQ_BEYOND_RECEIPTS", `checkpoint anchors seq ${c0.seq}, beyond the carried receipts (last seq ${manifest.receiptRange.end}) — there is no post-checkpoint receipt to verify against it`);
       return out;
@@ -374,6 +418,11 @@ export function verifyBundle(bundle, opts = {}) {
       const sig = verifySignedCheckpoint(cp, cps[i].key); // era i's key, era i's sig
       if (!sig.ok) {
         fail(sig.code, `rotation era ${i} (seq ${cp.seq}): ${sig.detail}`);
+        return out;
+      }
+      const rev = revocationVerdict(cp, revokedKeys, `rotation era ${i} (seq ${cp.seq}): `);
+      if (rev) {
+        fail(rev.code, rev.detail);
         return out;
       }
       if (cp.seq > manifest.receiptRange.end) {

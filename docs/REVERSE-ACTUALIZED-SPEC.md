@@ -739,5 +739,87 @@ rotation is the tested v2→v3 migration story.
   re-snapshots is parked.
 - **Parked (in demand order):** organ-side keyrings (boot takes explicit
   keys; the keyring {fingerprint → key} law lives on the qmr2 attribution
-  side and can port back in a later lane), revocation lists, checkpoint
-  expiry/validity windows, multi-signer (k-of-n) checkpoints.
+  side and can port back in a later lane), ~~revocation lists~~ (§11: the
+  ENFORCEMENT half landed in wave-69 — `opts.revokedKeys` + `E_KEY_REVOKED`;
+  the statement layer stays parked by design), checkpoint expiry/validity
+  windows, multi-signer (k-of-n) checkpoints.
+
+---
+
+## 11. v3-adjacent, design-first — key revocation for checkpoint custody (wave-69, lane 69-b)
+
+§10.7 parked "revocation lists". This section un-parks the DESIGN and splits it
+into the two halves that have wildly different costs — one is now implemented
+(trivially, proven by `node --test tests/revocation.test.mjs`), one stays
+parked on purpose:
+
+- **ENFORCEMENT — implemented (the trivial half).** A verifier that ALREADY
+  holds a revocation map can refuse revoked eras by name:
+
+  ```
+  boot(bundle, { checkpointKey(s)…, revokedKeys: { fingerprint → revocationSeq } })
+  ```
+
+  Law: a NAMED (Ed25519) era whose checkpoint anchors `seq > revocationSeq`
+  refuses with **`E_KEY_REVOKED`**. The era stays valid up to AND INCLUDING
+  `revocationSeq` — closure is the first seq the key may no longer anchor, and
+  revocation is never retroactive beyond the declared closure (the organ has no
+  wall clock; seq is the only ordering there is). The refusal names the era,
+  the key fingerprint, and the closure seq. A malformed map (non-object,
+  non-64-hex fingerprint, non-integer or negative seq) refuses
+  `CHECKPOINT_MALFORMED` BEFORE any era is examined — a broken revocation list
+  is refused outright, never partially trusted. HMAC eras carry no fingerprint,
+  so they are immune by construction: a shared secret has no identity to
+  revoke — rotate instead. The map bites only where signatures are actually
+  verified (partial-custody seeds and rotation eras); an `opts.trustedCheckpoint`
+  path verifies no signature, so it has nothing for revocation to bite on.
+  Naming note: the code carries the `E_` prefix (qmr law, not the organ
+  `CHECKPOINT_*` family) deliberately — revocation is a trust-statement
+  concept shared with the qmr2 attribution layer, and one greppable name
+  across both repos beats two pretty ones.
+
+- **STATEMENT — design-first, parked (the nontrivial half).** Who may declare a
+  key dead, in what document, and how that document reaches verifiers. The
+  design, for the lane that picks it up:
+
+  1. **The revocation statement.** `{ schema: "quilt.organ.key-revocation",
+     schemaVersion: 1, fingerprint, revocationSeq, organId?, reason?, sig }` —
+     signed by EITHER the revoked key itself (self-revocation: key compromise
+     excepted — a stolen key revoking itself is theater) OR its already-trusted
+     successor key (rotation-with-blame: the era walk proves succession, so the
+     successor's signature is checkable against the same custody chain). The
+     statement is an ORDINARY organ-adjacent document: canonical-JSON signed
+     over the canonical triple `{fingerprint, revocationSeq, organId?}` —
+     the same signing-payload discipline as checkpoints (§8.1/§10.1).
+  2. **Where it enters the courtroom.** The era walk (§4f) gains one step
+     between signature verification and anchor verification — exactly where
+     `revocationVerdict` sits today, but fed from COLLECTED statements instead
+     of an `opts` map: collect statements → verify signatures → merge into the
+     effective revocation map → walk eras. No new courtroom position, no new
+     ordering question.
+  3. **Distribution is the hard part, honestly.** The protocol verifies
+     signatures under keys the verifier CHOOSES to hold (trust-on-first-use,
+     §10.7); a revocation statement only bites verifiers that FETCH it. The
+     honest v1: statements ride the same channel the keys already ride (the
+     keyring manifests next to the keys), and revocation is a VERIFIER-side
+     freshness problem the protocol refuses to solve with PKI (no CA, no OCSP,
+     no gossip — §8.6's non-goal stands until a fleet-wide channel exists).
+
+  **Rotation vs revocation:**
+
+  | | rotation (§10.4) | revocation (§11) |
+  |---|---|---|
+  | trigger | planned (end-of-life, migration) | incident (compromise, departure, mistake) |
+  | requires a new key | yes — the successor IS the mechanism | no — closes an era without replacing it |
+  | era closure | at the rotation boundary the era-walk proves | at the statement's `revocationSeq` |
+  | old key after closure | still verifies OLD checkpoints (pre-boundary) | still verifies checkpoints ≤ `revocationSeq` |
+  | who signs the transition | the era chain itself (anchor replays) | the revoked key (self) or the successor (blame) |
+  | retroactive? | never — anchors before the boundary stay valid | never — closure is forward-only (seq law) |
+
+  **Parking receipt (honest):** the enforcement half shipped this lane because
+  it is ~20 lines, a map, and four named refusals — and because `E_KEY_REVOKED`
+  needed to EXIST as a named code before any statement layer could target it.
+  The statement half stays parked: without an adoption story (who fetches
+  statements, how often, from where) its format would be dead code with a
+  schema. Demand signal to watch: the first fleet organ with a COMPROMISED or
+  departed key makes the statement layer the next lane's cheapest work.

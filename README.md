@@ -353,7 +353,12 @@ anchoredAt, publicKeyFingerprint }` (v2 organs carry `{ kind:
 "hmac-sha256", anchoredAt }` — a shared secret has no name, the honest
 residual, receipted in the provenance itself). Honest scope (§10.7): the
 anchor vouches for the prefix exactly as v2's does; key distribution is
-trust-on-first-use; issuance/revocation remain parked.
+trust-on-first-use. Revocation (§11, wave-69): the ENFORCEMENT half is live —
+`boot(bundle, { …, revokedKeys: { fingerprint → revocationSeq } })` refuses
+eras anchored after a key's closure with `E_KEY_REVOKED`; the signed-statement
+layer stays parked by design (spec §11's parking receipt). Minting a keyring
+(identity + fingerprint + ready-made `{fingerprint → publicKeyPem}` map) is
+one helper: `node examples/keyring-mint.mjs` (or import `mintKeyring`).
 
 ---
 

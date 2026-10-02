@@ -5,7 +5,7 @@
   "description": "JEV canon-oracle toolkit for Quilt + the Cell-Organ Snapshot & Boot protocol (v0 custody + v1 rewind family/transactions + v2 checkpoint signatures & partial custody + v3 Ed25519 attribution & key rotation). No external deps; Node >= 18.",
   "type": "module",
   "scripts": {
-    "test": "node --test test/organ.test.mjs tests/chrono-interop.test.mjs",
+    "test": "node --test test/organ.test.mjs tests/chrono-interop.test.mjs tests/revocation.test.mjs",
     "demo": "node examples/boot-demo.mjs",
     "demo:rewind": "node examples/rewind-demo.mjs",
     "fixture:chrono": "node scripts/vendor-chrono-fixture.mjs"
