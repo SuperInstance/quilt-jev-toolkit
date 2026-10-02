@@ -1,10 +1,11 @@
 # quilt-jev-toolkit
 
 > Small toolkit for using JEV (TypeSafe) as a Quilt canon oracle — and, since
-> wave 63, home of the **Cell-Organ Snapshot & Boot protocol (v0)**: use a
+> wave 63, home of the **Cell-Organ Snapshot & Boot protocol**: use a
 > receipt-chain ledger to rewind, snapshot, and boot saved states of cells,
 > groups of cells (organs), or entire quilts, as drop-ins that nest inside
-> another program or quilt.
+> another program or quilt. v0 = custody (snapshot/boot/nest); v1 = the rewind
+> family + write-side transactions (below).
 
 JEV is a hosted oracle that answers yes/no, multiple choice, and
 scored questions about content. It's deterministic (variance < 0.01
@@ -93,7 +94,7 @@ Boot throws `OrganBootError` (never partially boots) on: `SCHEMA_DRIFT`,
 `DUPLICATE_NEST`; the double-entry audit reports `DOUBLE_ENTRY_UNBALANCED /
 _HASH_MISMATCH / _STATE_MISMATCH` and never auto-repairs.
 
-Proofs: `test/organ.test.mjs` (23/23) — including a self-consistent *forged*
+Proofs: `test/organ.test.mjs` (23/23 v0; 34/34 with the v1 section below) — including a self-consistent *forged*
 chain (re-hashed by an attacker) that only replay can catch, and a forged host
 credit caught by double-entry. Evidence receipt: `examples/receipts/boot-demo-receipt.json`.
 
@@ -101,6 +102,100 @@ v0 substrate note: the toolkit had no cells/ledger concept before this lane, so
 `src/organ/toyQuilt.mjs` is the receipted stand-in quilt (4 op types, pure,
 clock-free). When a real cells/ledger layer lands (quilt-upstream or here),
 organ code moves onto it by adapting `quiltApply / applyOp / stateOf`.
+
+---
+
+## ORGAN BOOT v1 — the rewind family + write-side transactions
+
+v1 adds three verbs on top of v0's snapshot/boot/nest. v0's law is carried over
+untouched: **nothing is trusted, everything is re-proven** — the subject
+(bundle or booted organ) is fully re-verified (chain + replay == carried state)
+*before* any query, rewind, or write runs, so a rewind is never a forgery
+laundromat for the tail it ignores.
+
+- `stateAt(subject, seq)` — time-travel query, pure: the state as of receipt
+  `seq`, hash-asserted against an independent prefix replay. Never mutates,
+  never writes host receipts.
+- `rewind(subject, toSeq)` — bundle form: a pure view `{ state, stateHash,
+  provenance }` (input untouched). Organ form: destructive — the organ's ledger
+  truncates to `toSeq`, cells are rebuilt by pure replay (byte-equal to a fresh
+  boot of the truncated bundle), and if the organ is nested the host receives
+  exactly ONE compensating receipt `{ type: "organ.rewind", organId, fromSeq,
+  toSeq, stateHashAfter, rewound: [{creditSeq, creditHash, organSeq,
+  debitHash}, ...] }` — the double-entry discipline applied backwards,
+  append-only: the superseded credits stay in the host ledger, marked dead by
+  the evidence list.
+- `transact(bundle, ops)` — all ops or nothing. PREPARE stages every op on
+  detached copies, each validated against the post-op state (first failure
+  names `failedOp` + code; the input bundle is byte-untouched). COMMIT
+  materializes the successor bundle exactly once (`supersedes` pinned, same
+  organId) and self-verifies it through the boot courtroom — a committed bundle
+  is one that would boot.
+
+### The 5 commands
+
+```bash
+# 0. the proof suite (34 tests) and the v1 end-to-end demo
+npm test                                    # 23 v0 + 11 v1
+npm run demo:rewind                         # transact → atomicity → stateAt → rewind → compensating credit → fail-closed audit
+
+# 1. STATE AT — time-travel query (pure; bundles and booted organs)
+node -e '
+import("./src/organ/rewind.mjs").then(async ({ stateAt }) => {
+  const { buildGreeterQuilt } = await import("./examples/greeter-organ.mjs");
+  const { snapshot } = await import("./src/organ/snapshot.mjs");
+  const q = buildGreeterQuilt();
+  const v = stateAt(snapshot(q.cells, q.ledger, { name: "greeter-organ" }), 5);
+  console.log(v.seq, v.stateHash.slice(0, 16), v.provenance.count, v.state.cells.subject.value);
+});'
+
+# 2. REWIND — bundle form is a pure view; organ form is the real rewind
+#    rewind(bundle, toSeq) → { state, stateHash, provenance }
+#    rewind(organ,  toSeq) → + rewoundFrom, compensating (host receipt if credits are revoked)
+
+# 3. TRANSACT — atomic multi-op write (input bundle byte-untouched on any failure)
+#    transact(bundle, ops) → ok: { bundle, newReceipts, fromStateHash, toStateHash }
+#                            fail: { ok:false, phase:"prepare", failedOp, code, detail }
+
+# 4. REWIND PAST A NEST BOUNDARY — compensating entry, double-entry applied backwards
+#    host ledger gains organ.rewind; verifyDoubleEntry(host, organ)
+#      → { ok, creditsChecked, creditsRevoked, rewinds }   // nets to zero
+
+# 5. CONTINUE + RE-SNAPSHOT — the organ appends from the rewound tip, custody unbroken
+#    organ.append(op) → fresh debit + fresh host credit; snapshotOrgan(organ)
+#    boot(snapshotOrgan(organ)) → hash-equal state in a fresh quilt
+```
+
+(1 is a runnable one-liner; 2–5 are the lines `examples/rewind-demo.mjs` runs,
+each asserted by a demo stage with a committed evidence receipt at
+`examples/receipts/rewind-v1-demo-receipt.json`.)
+
+### The v1 proofs (11 new tests, all in `test/organ.test.mjs`)
+
+- **rewind round-trip**: `rewind(bundle, 0)` reproduces the genesis state
+  byte-identically; rewind to the pre-advance tip == the v0 snapshot's state
+  hash; rewind to tip == carried state; a rewound organ's re-snapshot boots
+  hash-equal in a fresh quilt.
+- **transaction atomicity**: fail op 2 of 3 → `OP_APPLY_FAILED` at
+  `failedOp: 1`, staged effects never leak, the bundle is byte-identical to
+  before the transaction.
+- **compensating credit**: rewinding a nested organ past its nest boundary
+  emits one `organ.rewind` host receipt revoking exactly the post-nest
+  credits; the host ledger still verifies; double-entry nets to zero; a
+  partial rewind leaves the surviving credits pairing 1:1.
+- **stateAt determinism**: same seq → same hash across independent builds and
+  runs; pure on bundles and organs.
+- **fail-closed**: forged rewind receipts are caught three ways (padded
+  evidence → `DOUBLE_ENTRY_REWIND_INVALID` + `DOUBLE_ENTRY_HASH_MISMATCH`;
+  bogus `stateHashAfter` → `DOUBLE_ENTRY_STATE_MISMATCH`; dangling evidence →
+  `DOUBLE_ENTRY_HASH_MISMATCH`); bounds refuse `REWIND_TARGET_INVALID` /
+  `REWIND_PAST_CUSTODY`; self-consistent forged chains refuse `stateAt`,
+  `rewind`, AND `transact` with v0's `REPLAY_DIVERGENCE`.
+
+Cross-feed: both v1 states (tip + rewound) are on the live fleet organ store —
+`examples/receipts/rewind-v1-upload-receipt.json` (uploaded through the
+receipted `quilt.organ.v1` dialect adapter; native-dialect refusal receipted as
+the DIALECT_DRIFT finding, unification parked to lane 64-c).
 
 ---
 

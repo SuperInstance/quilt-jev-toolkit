@@ -1,0 +1,103 @@
+{
+  "schema": "quilt-jev-toolkit/rewind-v1-demo-receipt/v1",
+  "lane": "64-a",
+  "writtenAt": "2026-10-02T01:02:27.305Z",
+  "organ": {
+    "organId": "greeter-organ@37b387834d456c92",
+    "name": "greeter-organ"
+  },
+  "transaction": {
+    "ops": 4,
+    "committed": true,
+    "fromManifestHash": "92137944254ce97f7107fa728cdebe8ecb75558f65ca4b0506552431ca3a60c2",
+    "toManifestHash": "f39018a2766879dfd2c41f1617e21a72c1f12c0d31dcf59f59dec9146e901c08",
+    "fromStateHash": "7d5e08940c44b56850dfcda3aa847c8c48496f9a82f39ea3918c09824430d605",
+    "toStateHash": "8b459407b8c34781757a9c54b8f9cf1e98eb46e196e35f186ae6a500ff72b8ac",
+    "supersedes": "92137944254ce97f7107fa728cdebe8ecb75558f65ca4b0506552431ca3a60c2",
+    "receipts": 16
+  },
+  "atomicity": {
+    "failedOp": 1,
+    "code": "OP_APPLY_FAILED",
+    "baseUnchanged": true
+  },
+  "stateAt": {
+    "seq": 5,
+    "stateHash": "feab101802a9f4eb67e624a8d768ed410294492da9ad417f294b1b6c75a26647"
+  },
+  "rewindGenesis": {
+    "toSeq": 0,
+    "stateHash": "ea8726355c847dbf612957894e4ac802ce7f3cb9354e7b1ee7e305294006d278",
+    "provenance": {
+      "start": 0,
+      "end": 0,
+      "count": 1,
+      "tipHash": "ab8ae4b44b84ba0216e5c9e5a797c70fd687b1f22fea3d187c19ce4d762451a5",
+      "carriedRange": {
+        "start": 0,
+        "end": 15,
+        "count": 16
+      }
+    }
+  },
+  "rewindPastNest": {
+    "fromSeq": 14,
+    "toSeq": 4,
+    "compensating": {
+      "hostSeq": 5,
+      "hash": "c3eb207e0b02d21e48efcf845502ce3e6a182056902a86a8b31c3c01fbf67c6d",
+      "revoked": 3
+    },
+    "doubleEntry": {
+      "ok": true,
+      "liveCredits": 0,
+      "revoked": 3,
+      "rewinds": 1
+    },
+    "hostLedgerLength": 7,
+    "continuedDebitSeq": 5,
+    "reSnapshotReceipts": 6,
+    "reBootedStateHash": "c517969127e8ec15170589cff548682c0fdd8b7eb927eb61bfe6fc40a4ceef44"
+  },
+  "audit": {
+    "paddedEvidenceCaught": true,
+    "firstError": "DOUBLE_ENTRY_REWIND_INVALID"
+  },
+  "stages": [
+    {
+      "stage": "1.transact-commit",
+      "ok": true,
+      "detail": "4 ops committed once: receipts 12→16, supersedes=92137944254ce97f…, out=\"Salutations, v1!\""
+    },
+    {
+      "stage": "2.transact-atomicity",
+      "ok": true,
+      "detail": "op 2 of 3 refused [OP_APPLY_FAILED] at failedOp=1; base bundle byte-identical (all-ops-or-nothing)"
+    },
+    {
+      "stage": "3.stateAt-determinism",
+      "ok": true,
+      "detail": "stateAt(5)=feab101802a9f4eb… == independent replay == second build; bundle untouched"
+    },
+    {
+      "stage": "4.rewind-genesis",
+      "ok": true,
+      "detail": "rewind to seq 0: provenance {start:0, end:0}, stateHash=ea8726355c847dbf…, byte-identical to genesis replay"
+    },
+    {
+      "stage": "5.rewind-past-nest",
+      "ok": true,
+      "detail": "organ.rewind receipt at host seq 5 revokes 3 credits (append-only: all 3 remain); double-entry nets to zero (0 live / 3 revoked)"
+    },
+    {
+      "stage": "5b.continue-after-rewind",
+      "ok": true,
+      "detail": "organ continues from the rewound tip (debit seq 5); new credit pairs; re-snapshot (6 receipts) boots hash-equal in a fresh quilt"
+    },
+    {
+      "stage": "6.rewind-audit-fail-closed",
+      "ok": true,
+      "detail": "self-consistent padding impossible — caught as [DOUBLE_ENTRY_REWIND_INVALID, DOUBLE_ENTRY_HASH_MISMATCH]"
+    }
+  ]
+}

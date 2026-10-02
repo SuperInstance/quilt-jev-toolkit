@@ -78,9 +78,21 @@ export function appendCredit(host, { organId, organSeq, debitHash, stateHashAfte
  * host credit, hashes pair 1:1, and each credit's stateHashAfter equals the
  * organ's replayed state at that organSeq.
  *
+ * v1 (lane 64-a), rewind-aware: an organ that has been rewound (see
+ * rewind.mjs) carries an `organ.rewind` receipt in the host ledger that
+ * REVOKES the host credits for the rewound window — the double-entry
+ * discipline applied backwards. The audit therefore treats a credit as live
+ * unless some organ.rewind receipt (same organId) LISTS it in its rewound[]
+ * evidence (credits minted after the rewind are never listed, so they stay
+ * live), and it self-audits each rewind receipt: its toSeq must sit inside
+ * the organ's carried range, its stateHashAfter must equal the organ's
+ * replayed state at toSeq, and every rewound[] entry must match a real host
+ * credit. Nothing is ever erased: revoked credits stay in the host ledger,
+ * marked dead by the compensating receipt.
+ *
  * @param host        host quilt (its own chain is verified first)
  * @param organ       booted organ { organId, ledger, cells, nestReceipt }
- * @returns { ok, errors, creditsChecked }
+ * @returns { ok, errors, creditsChecked, creditsRevoked, rewinds }
  */
 export function verifyDoubleEntry(host, organ) {
   const errors = [];
@@ -90,20 +102,14 @@ export function verifyDoubleEntry(host, organ) {
   const nestSeq = organ.nestReceipt?.op?.organSeq;
   if (!Number.isInteger(nestSeq)) {
     errors.push({ code: "DOUBLE_ENTRY_UNBALANCED", detail: "organ has no valid nest receipt (not nested?)" });
-    return { ok: false, errors, creditsChecked: 0 };
+    return { ok: false, errors, creditsChecked: 0, creditsRevoked: 0, rewinds: 0 };
   }
 
   const credits = host.ledger.filter((r) => r.op?.type === "organ.credit" && r.op.organId === organ.organId);
+  const organRewinds = host.ledger.filter((r) => r.op?.type === "organ.rewind" && r.op.organId === organ.organId);
   const debits = organ.ledger.filter((r) => r.seq > nestSeq);
 
-  if (credits.length !== debits.length) {
-    errors.push({
-      code: "DOUBLE_ENTRY_UNBALANCED",
-      detail: `${debits.length} organ debits after nest but ${credits.length} host credits`,
-    });
-  }
-
-  // Replay the organ ledger once, capturing the state hash after each debit.
+  // Replay the organ ledger once, capturing the state hash after each receipt.
   const stateAtSeq = new Map();
   const replayed = {};
   for (const r of organ.ledger) {
@@ -114,24 +120,101 @@ export function verifyDoubleEntry(host, organ) {
       stateAtSeq.set(r.seq, cellsStateHash(replayed));
     } catch (e) {
       errors.push({ code: "REPLAY_INVALID_OP", detail: `organ ledger replay failed at seq ${r.seq}: ${e.message}` });
-      return { ok: false, errors, creditsChecked: 0 };
+      return { ok: false, errors, creditsChecked: 0, creditsRevoked: 0, rewinds: organRewinds.length };
+    }
+  }
+  const carriedSeqs = new Set(organ.ledger.map((r) => r.seq));
+  const creditBySeq = new Map(credits.map((c) => [c.seq, c]));
+
+  // -- v1: self-audit every organ.rewind receipt (the compensating entries) --
+  // Revocation is EVIDENCE-BASED: a credit is dead exactly when some rewind
+  // receipt lists it in rewound[]. Credits created AFTER a rewind (the organ
+  // continues appending from the rewound tip) are never listed, so they stay
+  // live and pair with their fresh debits. An incomplete or padded evidence
+  // list cannot cheat the audit: the live-credit vs live-debit pairing below
+  // is the ground truth.
+  const revokedCreditSeqs = new Set();
+  for (const R of organRewinds) {
+    const to = R.op.toSeq;
+    if (!Number.isInteger(to) || !carriedSeqs.has(to)) {
+      errors.push({
+        code: "DOUBLE_ENTRY_REWIND_INVALID",
+        detail: `organ.rewind at host seq ${R.seq}: toSeq ${JSON.stringify(to)} is not a seq the organ's carried ledger contains`,
+      });
+    }
+    if (Number.isInteger(to) && stateAtSeq.get(to) !== R.op.stateHashAfter) {
+      errors.push({
+        code: "DOUBLE_ENTRY_STATE_MISMATCH",
+        detail: `organ.rewind at host seq ${R.seq}: stateHashAfter ${R.op.stateHashAfter} != organ replay at seq ${to} (${stateAtSeq.get(to)})`,
+      });
+    }
+    if (!Array.isArray(R.op.rewound)) {
+      errors.push({ code: "DOUBLE_ENTRY_REWIND_INVALID", detail: `organ.rewind at host seq ${R.seq} carries no rewound[] evidence list` });
+      continue;
+    }
+    const listed = new Set();
+    for (const w of R.op.rewound) {
+      // temporal form: an honest rewinder lists only credits that ALREADY
+      // existed (host seq below the rewind receipt) — a credit minted after
+      // the rewind belongs to the organ's continued life and is unrevokable
+      if (!Number.isInteger(w.creditSeq) || w.creditSeq >= R.seq) {
+        errors.push({
+          code: "DOUBLE_ENTRY_REWIND_INVALID",
+          detail: `organ.rewind at host seq ${R.seq} lists credit seq ${JSON.stringify(w.creditSeq)}, which does not precede the rewind receipt — later credits are unrevokable by it`,
+        });
+      }
+      if (listed.has(w.creditSeq)) {
+        errors.push({ code: "DOUBLE_ENTRY_REWIND_INVALID", detail: `organ.rewind at host seq ${R.seq} lists credit seq ${JSON.stringify(w.creditSeq)} twice` });
+      }
+      listed.add(w.creditSeq);
+      revokedCreditSeqs.add(w.creditSeq);
+      const c = creditBySeq.get(w.creditSeq);
+      if (!c || c.hash !== w.creditHash || c.op.organSeq !== w.organSeq || c.op.debitHash !== w.debitHash) {
+        errors.push({
+          code: "DOUBLE_ENTRY_HASH_MISMATCH",
+          detail: `organ.rewind at host seq ${R.seq} lists credit seq ${JSON.stringify(w.creditSeq)}, which the host ledger does not carry with those hashes`,
+        });
+      }
     }
   }
 
-  const debitBySeq = new Map(debits.map((d) => [d.seq, d]));
-  for (const c of credits) {
+  const liveCredits = credits.filter((c) => !revokedCreditSeqs.has(c.seq));
+  const deadCredits = credits.length - liveCredits.length;
+
+  // v1 pairing law (rewind-aware): a LIVE credit must resolve to an organ
+  // debit the organ's CURRENT carried ledger actually holds (same seq, same
+  // debitHash) — after a rewind the organ keeps appending from the rewound
+  // tip, so "after nest" is no longer a pure seq-window test on the credit
+  // side. The requirement direction stays: every carried post-nest debit
+  // (seq > nestSeq) must be covered by a live credit; a debit whose credit was
+  // robbed shows up as a host CHAIN_GAP first (append-only ledger), and a
+  // credit robbed of its debit shows up here.
+  const debitBySeq = new Map(organ.ledger.map((d) => [d.seq, d]));
+  const covered = new Set();
+  for (const c of liveCredits) {
     const d = debitBySeq.get(c.op.organSeq);
-    if (!d) {
-      errors.push({ code: "DOUBLE_ENTRY_HASH_MISMATCH", detail: `credit at host seq ${c.seq} points at organSeq ${c.op.organSeq}, which is not a post-nest debit` });
+    if (!d || d.hash !== c.op.debitHash) {
+      errors.push({ code: "DOUBLE_ENTRY_HASH_MISMATCH", detail: `credit at host seq ${c.seq} points at organSeq ${c.op.organSeq}, which is not a debit the organ's carried ledger holds with that hash` });
       continue;
     }
-    if (d.hash !== c.op.debitHash) {
-      errors.push({ code: "DOUBLE_ENTRY_HASH_MISMATCH", detail: `credit at host seq ${c.seq}: debitHash ${c.op.debitHash} != organ debit hash ${d.hash}` });
-    }
+    covered.add(c.op.organSeq);
     if (stateAtSeq.get(d.seq) !== c.op.stateHashAfter) {
       errors.push({ code: "DOUBLE_ENTRY_STATE_MISMATCH", detail: `credit at host seq ${c.seq}: stateHashAfter ${c.op.stateHashAfter} != replayed organ state hash ${stateAtSeq.get(d.seq)}` });
     }
   }
+  const uncovered = debits.filter((d) => !covered.has(d.seq));
+  if (uncovered.length > 0) {
+    errors.push({
+      code: "DOUBLE_ENTRY_UNBALANCED",
+      detail: `${uncovered.length} carried post-nest debit(s) [seq ${uncovered.map((d) => d.seq).join(", ")}] without a live host credit (${deadCredits} credit(s) revoked by rewind)`,
+    });
+  }
 
-  return { ok: errors.length === 0, errors, creditsChecked: credits.length };
+  return {
+    ok: errors.length === 0,
+    errors,
+    creditsChecked: liveCredits.length,
+    creditsRevoked: deadCredits,
+    rewinds: organRewinds.length,
+  };
 }

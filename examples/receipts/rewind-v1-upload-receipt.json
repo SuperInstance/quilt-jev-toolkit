@@ -1,0 +1,66 @@
+{
+  "schema": "quilt-jev-toolkit/rewind-v1-upload-receipt/v1",
+  "lane": "64-a",
+  "writtenAt": "2026-10-02T00:55:19.461Z",
+  "store": "https://organ-boot-loader.casey-digennaro.workers.dev",
+  "dialects": {
+    "toolkit": "quilt.organ.manifest/v1",
+    "worker": "quilt.organ.v1"
+  },
+  "uploadBudget": {
+    "note": "probe PUT stored nothing (HTTP 400); exactly 2 stored uploads — within the ≤2 budget",
+    "storedUploads": 2
+  },
+  "states": {
+    "tip": {
+      "manifestHash": "1175f42d8ed13afb4c9ea9469883b439696b9325ade5dc073af408b624a48b88",
+      "stateHash": "0064d99be77a21b9a9e4fd3c3e1f8c015f09dd0d2b676296c29970528346bd61",
+      "receipts": 16,
+      "supersedes": "92137944254ce97f7107fa728cdebe8ecb75558f65ca4b0506552431ca3a60c2"
+    },
+    "rewound": {
+      "manifestHash": "09c25bfc399232bdfaf3df724dfe6fbb03ade9af490b5917f978c7601f0a26c1",
+      "stateHash": "f6f781f0566b00478b85f107a6c48514876febdcb0015fc2f0c7775e551463bf",
+      "receipts": 9,
+      "rewoundToSeq": 8,
+      "provenanceTipHash": "d65fbdde41dc1bda265752648cec04a78b451e37d6627381298dedaebd4a2e0f"
+    }
+  },
+  "uploads": [
+    {
+      "label": "rewound-state",
+      "id": "fd72249fba0427f613ce0792f1d1199cb8535827f801693d20b3d0f92eda527a",
+      "stateHash": "f6f781f0566b00478b85f107a6c48514876febdcb0015fc2f0c7775e551463bf",
+      "toSeq": 8
+    },
+    {
+      "label": "tip-state",
+      "id": "b9b9e199ffa0b794d2b3c67872b114f821e74ac26dd8d7536917a61d31eb8da9",
+      "stateHash": "0064d99be77a21b9a9e4fd3c3e1f8c015f09dd0d2b676296c29970528346bd61",
+      "toSeq": 15
+    }
+  ],
+  "verifications": [
+    {
+      "id": "fd72249fba0427f613ce0792f1d1199cb8535827f801693d20b3d0f92eda527a",
+      "label": "rewound-state",
+      "http": 200,
+      "bootable": true,
+      "reason": "manifest digest == id; sha256(canonicalJSON(state)) == manifest.stateHash; every receipt digest re-derives and the chain links genesis→tip matching receiptRange"
+    },
+    {
+      "id": "b9b9e199ffa0b794d2b3c67872b114f821e74ac26dd8d7536917a61d31eb8da9",
+      "label": "tip-state",
+      "http": 200,
+      "bootable": true,
+      "reason": "manifest digest == id; sha256(canonicalJSON(state)) == manifest.stateHash; every receipt digest re-derives and the chain links genesis→tip matching receiptRange"
+    }
+  ],
+  "findings": [
+    {
+      "finding": "DIALECT_DRIFT",
+      "detail": "worker refused the native toolkit bundle with HTTP 400: unsupported schema dialect: expected \"quilt.organ.manifest/v1\" (bundle.schema) or legacy \"quilt.organ.v1\" (bundle.schemaVersion), got neither — see schema/organ-manifest.v1.json — worker speaks quilt.organ.v1, toolkit speaks quilt.organ.manifest/v1 (lesson L15; unification parked to lane 64-c)",
+      "stored": false
+    }
+  ]
+}
