@@ -433,3 +433,16 @@ Use JEV as **one canary** in a multi-signal canon gate:
   `jev-latest` you sent)
 - For choice questions, `confidence` can be low even when the
   `choice` is clearly correct — check the `probabilities` dict
+
+---
+
+## Documentation
+
+Wave-69 documentation package (task 69-doc-b). Start here by audience:
+
+- **Agent onboarding (zero-shot entry)**: [docs/ONBOARDING.md](./docs/ONBOARDING.md) — identity, verify-commands (incl. the env-key rule), reading order, gotchas, frontier.
+- **End users**: [docs/USER-GUIDE.md](./docs/USER-GUIDE.md) — install, first success (real captured output), organ + JEV everyday tasks, fail-closed troubleshooting table, FAQ.
+- **Developers**: [docs/DEVELOPER-GUIDE.md](./docs/DEVELOPER-GUIDE.md) — code layout, core concepts, how to add ops/checkpoint schemes/adapters, testing, conventions.
+- **Engineers / operators**: [docs/ENGINEERING-NOTES.md](./docs/ENGINEERING-NOTES.md) — architecture, invariants, failure modes & blast radius, cost envelope, the credential model, design decisions.
+- **Executives**: [docs/CTO-BRIEF.md](./docs/CTO-BRIEF.md) — value, maturity, risks, cost profile, strategic options, integration surface.
+- **Index of all deeper knowledge**: [docs/KNOWLEDGE-MAP.md](./docs/KNOWLEDGE-MAP.md) — every module, spec section, receipt, and journal Task ID, one line each.
