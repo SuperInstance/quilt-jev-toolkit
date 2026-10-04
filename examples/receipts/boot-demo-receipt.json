@@ -1,7 +1,7 @@
 {
   "schema": "quilt-jev-toolkit/boot-demo-receipt/v0",
   "lane": "63-c",
-  "writtenAt": "2026-10-02T02:40:14.538Z",
+  "writtenAt": "2026-10-04T06:32:52.988Z",
   "organ": {
     "organId": "greeter-organ@37b387834d456c92",
     "name": "greeter-organ"
