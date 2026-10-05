@@ -166,3 +166,68 @@ state hashes are deterministic — `greeter-organ@37b387834d456c92`).
 - The JEV discovery rounds (1–9) have not been re-run since 2026-09-24 and
   the native TYPESAFEAI_KEY transport was lost (worklog Task 67-j); the JEV
   side is receipted history until a key returns.
+
+---
+
+## Fleet seed (2026-10-06 handoff) — momentum, vision, roadmaps, mesh
+
+> Additive section for follow-up agents; the sections above are the
+> zero-shot mechanics. Mesh context: `SuperInstance/fleet-seeds` →
+> `docs/handoff-2026-10-06/ORG-MESH.md`.
+
+### Momentum since the doc above froze
+
+- **Organ custody v0→v3 shipped**: snapshot/boot/nest (v0), the rewind
+  family + write-side transactions (v1), checkpoint signatures + partial-
+  custody replay seeds (v2), **Ed25519 attribution — the checkpoint signer
+  has a name** (v3: `signCheckpointEd25519`, key rotation, the death audit
+  counting 26 fail-closed rules), §9 chrono adapter (a sealed quilt-chrono
+  sheet boots as an organ), §11 key revocation (enforcement half live,
+  statement half designed + parked). Wave-69 docs package refreshed all
+  guides; wave-68 dog-food re-ran demos against live receipts.
+- **FB6 (PR #1 open):** the zeroclaw journal boots as an organ — custody
+  courtroom + byte-exact replay, re-deriving every fnv1a64 row hash from
+  GENESIS, normalizing both historical genesis representations, refusing
+  tamper/swap with named rows. The lesson pinned inside: hand-transcribed
+  fixtures recompute wrong — always lift fixtures verbatim from the shipped
+  journal.
+- **The JEV reference client side** is env-key-gated and currently dark
+  (Typesafe key revoked 2026-10-06). The offline organ protocol is fully
+  live and needs no key.
+
+### Vision
+
+Two hard problems solved cheaply, forever: (1) doctrine claims need a judge —
+this repo measured JEV's behavior (95% factual accuracy, 7/7 adversarial
+resistance, 66 ms/call, determinism p 0.980–0.990) and gated 50 fleet repos
+for canon-worthiness; (2) agents die mid-task and sandboxes wipe — the organ
+protocol makes a cell group's entire history a content-addressed,
+replay-verifiable bundle a fresh process can boot and continue. **Boot is the
+courtroom**: nothing trusted, everything re-proven. That phrase is the repo
+in six words.
+
+### Roadmaps (several directions)
+
+1. **Merge FB6 (#1)** — zeroclaw journal custody; then the journal becomes a
+   reference fixture for every future custody consumer.
+2. **§11 statement half** — the designed-not-built revocation statement
+   machinery; small, well-specified, parked by choice.
+3. **Organ networking** — organs compose (nesting exists); a *registry* of
+   organ bundles with custody proofs across repos is the natural v4, and
+   would slot under fleet-witness checkpoints as the serving layer.
+4. **Live-JEV revival** — with a fresh key: re-run the fleet gate on repos
+   minted since wave-69, and adopt jev-quilt's R6 measurement discipline
+   (same-window voting) before trusting any single verdict.
+5. **quilt-chrono deepening** — §9 proved a sealed sheet boots; sheet-*state*
+   rewind (not just boot) is the adjacent build.
+
+### How it meshes
+
+- **Wire-protocol donor:** `jev_client.py`'s noul/choice/score protocol was
+  copied verbatim by jev-quilt and other lanes; keep it the reference.
+- **Identity sharing:** organ v3 Ed25519 semantics are byte-identical with
+  quilt-mcp-receipts qmr2 §8 attribution (sigKeyFp = sha256 of SPKI PEM) —
+  cross-repo identity is a feature, not drift.
+- **Consumers:** doubt-ledger discharge rows, zero-msg-test decision chains
+  (if that lane opens), any lane needing custody of cell state.
+- Org state: `fleet-seeds` → `docs/handoff-2026-10-06/HANDOFF.md`.
